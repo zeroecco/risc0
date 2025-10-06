@@ -15,4 +15,7 @@ build:dbg --strategy=CppLink=local
 
 build:macos --@rules_cuda//cuda:enable=false
 
+test --test_env=ASDF_PYTHON_VERSION=3.12.5
+build --action_env=ASDF_PYTHON_VERSION=3.12.5
+
 try-import %workspace%/.bazelrc.local
