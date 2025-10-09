@@ -14,8 +14,11 @@
 
 #pragma once
 
-#include "rv32im/argument/argument.h"
+#include "rv32im/argument/cpu_state.h"
+#include "rv32im/argument/decode.h"
+#include "rv32im/argument/unit.h"
 #include "rv32im/base/constants.h"
+#include "rv32im/base/opt.h"
 #include "rv32im/base/platform.h"
 #include "rv32im/circuit/inst.h"
 

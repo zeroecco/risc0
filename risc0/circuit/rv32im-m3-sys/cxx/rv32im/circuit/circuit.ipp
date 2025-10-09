@@ -14,8 +14,6 @@
 
 #pragma once
 
-#include "rv32im/circuit/circuit.h"
-
 #define EQ(a, b) ctx.eqz((a) - (b))
 #define EQZ(a) ctx.eqz(a)
 
