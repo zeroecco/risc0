@@ -27,7 +27,13 @@
 #include "rv32im/circuit/units.h"
 #include "rv32im/witness/witness.h"
 
-// NOTE: For any given row, it appears to be the case that a single block type is used.
+// The Top component is the root of the circuit's data group.
+//
+// It is where the blocks are combined to construct the full circuit. It specifies a selector, which
+// is used to indicate which block is active in a given row of the trace. On a given row, a single
+// block type can be active, and for that block type an array of one or more blocks are provided.
+// The max size of this array depends on the block type. When the array is not full, inactive
+// entries are indicated with the `isValid` bit.
 template <typename C> struct Top {
   TwoHot<C, MAJOR_SPLIT_SIZE, MINOR_SPLIT_SIZE> select;
   union {
