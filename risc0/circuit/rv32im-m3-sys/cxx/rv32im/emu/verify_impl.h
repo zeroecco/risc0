@@ -17,6 +17,8 @@
 
 #include <map>
 
+#include "rv32im/argument/argument.h"
+
 #include "rv32im/circuit/circuit.ipp"
 
 namespace NAMESPACE {

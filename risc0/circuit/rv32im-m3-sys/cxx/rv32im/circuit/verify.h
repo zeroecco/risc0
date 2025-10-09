@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include "rv32im/argument/argument.h"
+
 #include "rv32im/circuit/circuit.ipp"
 
 template <typename ValExtT> struct DefaultMixState {
