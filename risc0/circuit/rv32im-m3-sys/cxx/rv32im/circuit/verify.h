@@ -43,6 +43,21 @@ template <typename ValT, typename ValExtT> struct DefaultEqzHandler {
   }
 };
 
+template <typename ValT> struct SameTypeEqzHandler {
+  using MixStateT = DefaultMixState<ValT>;
+  ValT ecMix;
+
+  FDEV SameTypeEqzHandler(ValT ecMix) : ecMix(ecMix) {}
+
+  FDEV MixStateT getTrue() { return MixStateT(ValT(0), ValT(1)); }
+  FDEV MixStateT andEqz(MixStateT chain, ValT expr) {
+    return MixStateT(chain.tot + chain.mul * expr, chain.mul * ecMix);
+  }
+  FDEV MixStateT andCond(MixStateT chain, ValT cond, MixStateT inner) {
+    return MixStateT(chain.tot + chain.mul * inner.tot * cond, chain.mul * inner.mul);
+  }
+};
+
 template <typename ValT, typename ValExtT> struct DebugEqzHandler {
   using MixStateT = DefaultMixState<ValExtT>;
   ValExtT ecMix;
@@ -163,20 +178,23 @@ template <typename RegT, typename ValT, typename ValExtT, typename EqzCtx> struc
     accSubstep = 0;
     accTot = ValExtT(0);
   }
-  FDEV void eqz(ValT val) { innerMix = eqzCtx.andEqz(innerMix, val); }
-  FDEV void eqz(ValExtT val) { innerMix = eqzCtx.andEqz(innerMix, val); }
+
+  template <typename T> FDEV void eqz(T val) { innerMix = eqzCtx.andEqz(innerMix, val); }
+
   // Push an argument value into the permutation argument, if the isValid field is set.
   // Pushing an argument effectively increases its count by one in the permutation argument.
   //
   // This function is called by components within each block. The value of isValid is determined
   // from the associated register in the Top component.
   template <typename T> FDEV void push(const MTHR T& argument) { addArgument(isValid, argument); }
+
   // Pull an argument value into the permutation argument, if the isValid field is set.
   // Pushing an argument effectively decreases its count by one in the permutation argument.
   //
   // This function is called by components within each block. The value of isValid is determined
   // from the associated register in the Top component.
   template <typename T> FDEV void pull(const MTHR T& argument) { addArgument(-isValid, argument); }
+
   template <typename T> FDEV void addArgument(ValT count, const MTHR T& argument) {
     ValExtT flat = flattenArgument<T, VerifyContext>(argument, accMix + 1);
     denoms[accSubstep] = accMix[0] - flat;
