@@ -19,9 +19,6 @@
 
 template <typename T> struct OptSize {};
 
-// QUESTION: Why not use the convention of having the last enum value be named "ENUM_SIZE" or
-// simmilar, to make this less error prone.
-
 // A macro to impl OptSize<T> the given enum, so that it can be used with Option<T>.
 //
 // T is the name of the enum and L must be the last variant of the enum. If L is not the last

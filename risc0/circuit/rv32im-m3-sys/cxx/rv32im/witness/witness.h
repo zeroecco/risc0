@@ -71,8 +71,6 @@ struct EmptyWitness {
   BLOCK_TYPE(PageUncle, 18)                                                                        \
   BLOCK_TYPE(MakeTable, 3)
 
-// QUESTION: I think the leading 1 is wrong, but it does not matter because the only usage below is
-// in a truncating divide. Oh, unless Empty countes as a real BlockType.
 CONSTANT size_t NUM_BLOCK_TYPES = 1
 #define BLOCK_TYPE(name, count) +1
     BLOCK_TYPES
