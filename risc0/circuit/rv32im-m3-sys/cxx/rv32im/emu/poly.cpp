@@ -51,9 +51,9 @@ struct PolyValExt {
   explicit PolyValExt(FpExt val) : val(val) {}
   explicit PolyValExt(PolyVal val) : val(val.val) {}
   explicit PolyValExt(PolyVal e0, PolyVal e1, PolyVal e2, PolyVal e3) : val(
-    e0.val * FpExt(1, 0, 0, 0) + 
-    e1.val * FpExt(0, 1, 0, 0) + 
-    e2.val * FpExt(0, 0, 1, 0) + 
+    e0.val * FpExt(1, 0, 0, 0) +
+    e1.val * FpExt(0, 1, 0, 0) +
+    e2.val * FpExt(0, 0, 1, 0) +
     e3.val * FpExt(0, 0, 0, 1)) {}
   explicit PolyValExt(uint32_t x) : val(x) {}
 
@@ -111,6 +111,7 @@ FpExt computeConstraintPoly(const FpExt* eval, const Fp* globals, const FpExt* a
   size_t offset = 0;
   for (size_t i = 0; i < accumCols; i++) {
     accum.push_back(accumBase[offset++]);
+    // TODO(victor): Figure out why this makes sense.
     if (i < 4 || i >= accumNormalCols) {
       prevAccum.push_back(accumBase[offset++]);
     } else {

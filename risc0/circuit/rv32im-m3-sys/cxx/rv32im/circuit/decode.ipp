@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#pragma once
+
+#include "rv32im/argument/decode.h"
+#include "rv32im/argument/lookup.h"
+#include "rv32im/base/constants.h"
+#include "rv32im/base/opt.h"
+#include "rv32im/base/platform.h"
+#include "rv32im/circuit/decode.h"
+
 template<typename C>
 FDEV void FetchBlock<C>::set(CTX, FetchWitness witness) DEV {
   iCacheCycle.set(ctx, witness.iCacheCycle);
@@ -197,7 +206,7 @@ FDEV void DecodeBlock<C>::verify(CTX) DEV {
   EQ(computeNext.high.get(), fetch.nextPc.high.get());
   // Get actual instruction data
   Val<C> instLow = cond<C>(isCompressed.get(), load1.data.low.get(), low16());
-  Val<C> instHigh = cond<C>(isCompressed.get(), load1.data.high.get(), 
+  Val<C> instHigh = cond<C>(isCompressed.get(), load1.data.high.get(),
       cond<C>(pcDecomp.low1.get(), load1.data.low.get(), load0.data.high.get()));
   // Make sure the instruction matches the bits
   EQ(instLow, recomposeRange(0, 16));

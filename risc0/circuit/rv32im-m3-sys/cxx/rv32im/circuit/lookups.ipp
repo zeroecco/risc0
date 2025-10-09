@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#pragma once
+
+#include "rv32im/argument/lookup.h"
+#include "rv32im/base/platform.h"
+#include "rv32im/circuit/lookups.h"
+
 template<typename C>
 FDEV void RegU8<C>::set(CTX, Val<C> in) DEV {
   inner.set(ctx, in);
   uint32_t val = in.asUInt32();
   // This shouldn't happen, but make sure we don't corrupt memory
-  if (val >= 256) { 
+  if (val >= 256) {
     LOG(0, "ILLEGAL SET OF REGU8: " << val);
-    val = 0; 
+    val = 0;
   }
   ctx.tableAdd(val, 1);
 }
@@ -39,9 +45,9 @@ FDEV void RegU16<C>::set(CTX, Val<C> in) DEV {
   inner.set(ctx, in);
   uint32_t val = in.asUInt32();
   // This shouldn't happen, but make sure we don't corrupt memory
-  if (val >= 65536) { 
+  if (val >= 65536) {
     LOG(0, "ILLEGAL SET OF REGU16: " << val);
-    val = 0; 
+    val = 0;
   }
   ctx.tableAdd(256 + val, 1);
 }

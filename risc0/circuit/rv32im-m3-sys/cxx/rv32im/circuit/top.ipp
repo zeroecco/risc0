@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#pragma once
+
+#include "rv32im/base/platform.h"
+#include "rv32im/circuit/top.h"
+
 template<typename C>
 FDEV void AccumTop<C>::setPhase1(CTX, MDEV Top<C>* top, ValExt<C> z) DEV {
   Val<C> isBigInt =
-    top->select.major.bits[size_t(BlockType::BigInt) / MINOR_SPLIT_SIZE].get() * 
+    top->select.major.bits[size_t(BlockType::BigInt) / MINOR_SPLIT_SIZE].get() *
     top->select.minor.bits[size_t(BlockType::BigInt) % MINOR_SPLIT_SIZE].get();
 
   if (isBigInt == Val<C>(1)) {
@@ -59,15 +64,15 @@ FDEV void AccumTop<C>::setPhase2(CTX, MDEV Top<C>* top, MDEV AccumTop<C>* prev, 
       break;
     case PolyOp::SET_TERM:
       poly.set(ctx, ValExt<C>(0));
-      term.set(ctx, newPoly); 
-      total.set(ctx, prev->total.get()); 
+      term.set(ctx, newPoly);
+      total.set(ctx, prev->total.get());
       break;
     case PolyOp::ADD_TOTAL: {
         Val<C> coeff = top->mux.BigInt.data[0].getCoeff() - Val<C>(4);
         poly.set(ctx, ValExt<C>(0));
-        term.set(ctx, ValExt<C>(1)); 
-        total.set(ctx, prev->total.get() + prev->term.get() * newPoly * coeff); 
-      } 
+        term.set(ctx, ValExt<C>(1));
+        total.set(ctx, prev->total.get() + prev->term.get() * newPoly * coeff);
+      }
       break;
     case PolyOp::CARRY_1:
       poly.set(ctx, prev->poly.get() + (local.get() - neg) * Val<C>(16384));
@@ -86,7 +91,7 @@ template<typename C>
 FDEV void AccumTop<C>::verify(CTX, MDEV Top<C>* top, MDEV AccumTop<C>* prev, ValExt<C> z) DEV {
   // First, we verify phase 1
   Val<C> isBigInt =
-    top->select.major.bits[size_t(BlockType::BigInt) / MINOR_SPLIT_SIZE].get() * 
+    top->select.major.bits[size_t(BlockType::BigInt) / MINOR_SPLIT_SIZE].get() *
     top->select.minor.bits[size_t(BlockType::BigInt) % MINOR_SPLIT_SIZE].get();
   Val<C> polyOpGoal = isBigInt * top->mux.BigInt.data[0].polyOp.get();
   // Verify polyOp
@@ -120,12 +125,12 @@ FDEV void AccumTop<C>::verify(CTX, MDEV Top<C>* top, MDEV AccumTop<C>* prev, Val
   XEQ(PolyOp::SHIFT, total.get(), prev->total.get());
   // PolyOp::SET_TERM:
   XEQ(PolyOp::SET_TERM, poly.get(), ValExt<C>(0));
-  XEQ(PolyOp::SET_TERM, term.get(), newPoly); 
-  XEQ(PolyOp::SET_TERM, total.get(), prev->total.get()); 
+  XEQ(PolyOp::SET_TERM, term.get(), newPoly);
+  XEQ(PolyOp::SET_TERM, total.get(), prev->total.get());
   // PolyOp::ADD_TOTAL
   XEQ(PolyOp::ADD_TOTAL, poly.get(), ValExt<C>(0));
-  XEQ(PolyOp::ADD_TOTAL, term.get(), ValExt<C>(1)); 
-  XEQ(PolyOp::ADD_TOTAL, total.get(), prev->total.get() + prev->term.get() * newPoly * coeff); 
+  XEQ(PolyOp::ADD_TOTAL, term.get(), ValExt<C>(1));
+  XEQ(PolyOp::ADD_TOTAL, total.get(), prev->total.get() + prev->term.get() * newPoly * coeff);
   // PolyOp::CARRY_1
   XEQ(PolyOp::CARRY_1, poly.get(), prev->poly.get() + (local.get() - neg) * Val<C>(16384));
   XEQ(PolyOp::CARRY_1, term.get(), prev->term.get());
