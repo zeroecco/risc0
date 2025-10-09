@@ -14,8 +14,8 @@
 
 #pragma once
 
-#include "rv32im/argument/paging.h"
 #include "rv32im/argument/memory.h"
+#include "rv32im/argument/paging.h"
 #include "rv32im/argument/poseidon2.h"
 #include "rv32im/base/platform.h"
 #include "rv32im/circuit/paging.h"
