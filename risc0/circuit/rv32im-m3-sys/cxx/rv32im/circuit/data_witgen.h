@@ -16,9 +16,8 @@
 #pragma once
 
 #include "hal/hal.h"
-#include "rv32im/circuit/circuit.ipp"
 
-using risc0::RowInfo;
+#include "rv32im/circuit/circuit.ipp"
 
 // During data witgen, we ignore eqz, and all arguments
 template <size_t po2> struct DataWitgenContext {
