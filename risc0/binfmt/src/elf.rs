@@ -152,6 +152,11 @@ impl Program {
         #[cfg(feature = "rv32im-m3")]
         self.image.insert(RV32IM_VERSION_ADDR.0, 3);
     }
+
+    /// Write a word to the image
+    pub fn write_u32(&mut self, address: u32, value: u32) {
+        self.image.insert(address, value);
+    }
 }
 
 const MAGIC: &[u8] = b"R0BF"; // RISC Zero Binary Format
