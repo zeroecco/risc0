@@ -1144,6 +1144,14 @@ fn sys_mmap(
         }
         kprint!("sys_mmap: returning {:08x}", ptr as u32);
         Ok(ptr as u32)
+    } else if _fd == -1 && _flags & MAP_FIXED == MAP_FIXED && _addr != 0 {
+        let ptr: *mut u8 = _addr as *mut u8;
+        let aligned_length = align_up(len as usize, PAGE_SIZE);
+        unsafe {
+            ptr.write_bytes(0, aligned_length);
+        }
+        kprint!("sys_mmap: returning {:08x}", ptr as u32);
+        Ok(ptr as u32)
     } else {
         kpanic!("sys_mmap: unsupported scenario");
     }

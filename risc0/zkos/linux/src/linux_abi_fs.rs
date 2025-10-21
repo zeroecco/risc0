@@ -316,9 +316,13 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
     if fd_entry.fid != 0 {
         let mut cursor = offset;
         while cursor < offset + (count as u64) {
-            // read 128 bytes at a time
-            let count = count.min(128);
-            let tread = TreadMessage::new(0, fd_entry.fid, cursor, count);
+            // read max 128 bytes at a time
+            // This reads up to 128 bytes at a time, but is this what we want?
+            // If count is larger than 128, this will keep requesting 128 bytes per iteration,
+            // but always from the same offset (cursor), so it will keep reading the same data.
+            // Shouldn't we advance the offset/cursor and the buf pointer each time?
+            let max_count = (offset + count as u64 - cursor).min(128) as u32;
+            let tread = TreadMessage::new(0, fd_entry.fid, cursor, max_count);
             match tread.send_tread() {
                 Ok(_bytes_written) => {
                     // Success
@@ -330,14 +334,19 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
             }
             match RreadMessage::read_response() {
                 P9Response::Success(rread) => {
+                    if rread.count == 0 {
+                        kprint!(
+                            "read_file_to_user_memory: read 0 bytes, offset={} cursor={} count={}, max_count={}",
+                            offset,
+                            cursor,
+                            count,
+                            max_count
+                        );
+                        return Ok(0);
+                    }
                     let user_ptr = buf as *mut u8;
                     let user_ptr = unsafe { user_ptr.add(cursor as usize).sub(offset as usize) };
                     let data = rread.data;
-                    kprint!(
-                        "read_file_to_user_memory: user_ptr = {:?}, rread.count = {:?}",
-                        user_ptr,
-                        rread.count
-                    );
                     let _bytes_copied =
                         crate::kernel::copy_to_user(user_ptr, data.as_ptr(), rread.count as usize);
                     cursor += rread.count as u64;
