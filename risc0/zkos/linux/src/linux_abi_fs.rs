@@ -2132,7 +2132,10 @@ pub fn sys_statx(
 
     // AT_EMPTY_PATH flag (0x1000) - if filename is empty, stat the fd itself
     const AT_EMPTY_PATH: u32 = 0x1000;
-
+    if (_flags & AT_EMPTY_PATH) != 0 && _dfd < 3 {
+        // FIXME this doesn't return a statx buffer, it returns 0
+        return Ok(0);
+    }
     let target_fid = if (_flags & AT_EMPTY_PATH) != 0 && filename.is_empty() {
         // Stat the file descriptor itself
         kprint!("sys_statx: AT_EMPTY_PATH set, statting fd {}", _dfd);
