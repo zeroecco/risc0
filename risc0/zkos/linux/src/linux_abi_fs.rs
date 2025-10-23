@@ -1424,9 +1424,84 @@ pub fn sys_renameat2(
     _newpath: u32,
     _flags: u32,
 ) -> Result<u32, Err> {
-    let msg = b"sys_renameat2 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    use crate::p9::{P9Response, RrenameatMessage, TrenameatMessage};
+
+    if !get_p9_enabled() {
+        let msg = b"sys_renameat2: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Parse old path
+    let oldpath = unsafe { core::slice::from_raw_parts(_oldpath as *const u8, 256) };
+    let oldpath_len = oldpath
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(oldpath.len());
+    let oldpath_str = str::from_utf8(&oldpath[..oldpath_len]).map_err(|_| Err::Inval)?;
+
+    // Parse new path
+    let newpath = unsafe { core::slice::from_raw_parts(_newpath as *const u8, 256) };
+    let newpath_len = newpath
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(newpath.len());
+    let newpath_str = str::from_utf8(&newpath[..newpath_len]).map_err(|_| Err::Inval)?;
+
+    kprint!(
+        "sys_renameat2: '{}' -> '{}', flags=0x{:x}",
+        oldpath_str,
+        newpath_str,
+        _flags
+    );
+
+    // Split paths into directory and filename components
+    let (old_dir_fid, old_name) = get_dir_fid_into_temp_fid(_olddirfd, oldpath_str)?;
+    let (new_dir_fid, new_name) = get_dir_fid_into_temp_fid(_newdirfd, newpath_str)?;
+
+    // Send Trenameat message
+    let trenameat =
+        TrenameatMessage::new(0, old_dir_fid, old_name.to_string(), new_dir_fid, new_name);
+
+    match trenameat.send_trenameat() {
+        Ok(_) => {
+            kprint!("sys_renameat2: sent Trenameat");
+        }
+        Err(e) => {
+            kprint!("sys_renameat2: error sending Trenameat: {:?}", e);
+            if old_dir_fid == 0xFFFF_FFFE {
+                clunk(old_dir_fid, false);
+            }
+            if new_dir_fid == 0xFFFF_FFFE {
+                clunk(new_dir_fid, false);
+            }
+            return Err(Err::NoSys);
+        }
+    }
+
+    // Read response
+    match RrenameatMessage::read_response() {
+        P9Response::Success(_rrenameat) => {
+            kprint!("sys_renameat2: rename successful");
+            if old_dir_fid == 0xFFFF_FFFE {
+                clunk(old_dir_fid, false);
+            }
+            if new_dir_fid == 0xFFFF_FFFE {
+                clunk(new_dir_fid, false);
+            }
+            Ok(0)
+        }
+        P9Response::Error(rlerror) => {
+            kprint!("sys_renameat2: received Rlerror: ecode={}", rlerror.ecode);
+            if old_dir_fid == 0xFFFF_FFFE {
+                clunk(old_dir_fid, false);
+            }
+            if new_dir_fid == 0xFFFF_FFFE {
+                clunk(new_dir_fid, false);
+            }
+            Ok(-(rlerror.ecode as i32) as u32)
+        }
+    }
 }
 
 pub fn sys_sendfile64(_out_fd: u32, _in_fd: u32, _offset: u32, _count: u32) -> Result<u32, Err> {
