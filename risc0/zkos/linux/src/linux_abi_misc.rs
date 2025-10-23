@@ -611,7 +611,7 @@ pub fn sys_move_pages(
 
 pub fn sys_mprotect(_addr: u32, _len: u32, _prot: u32) -> Result<u32, Err> {
     kprint!(
-        "sys_mprotect(_addr={}, _len={}, _prot={})",
+        "sys_mprotect(addr=0x{:08x}, len=0x{:x}, prot={}) -> returning success",
         _addr,
         _len,
         _prot

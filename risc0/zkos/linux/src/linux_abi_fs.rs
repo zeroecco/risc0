@@ -315,12 +315,9 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
     let fd_entry = get_fd(fd);
     if fd_entry.fid != 0 {
         let mut cursor = offset;
+        let mut total_bytes_read = 0u32;
         while cursor < offset + (count as u64) {
             // read max 128 bytes at a time
-            // This reads up to 128 bytes at a time, but is this what we want?
-            // If count is larger than 128, this will keep requesting 128 bytes per iteration,
-            // but always from the same offset (cursor), so it will keep reading the same data.
-            // Shouldn't we advance the offset/cursor and the buf pointer each time?
             let max_count = (offset + count as u64 - cursor).min(128) as u32;
             let tread = TreadMessage::new(0, fd_entry.fid, cursor, max_count);
             match tread.send_tread() {
@@ -342,7 +339,7 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
                             count,
                             max_count
                         );
-                        return Ok(0);
+                        return Ok(total_bytes_read);
                     }
                     let user_ptr = buf as *mut u8;
                     let user_ptr = unsafe { user_ptr.add(cursor as usize).sub(offset as usize) };
@@ -350,16 +347,17 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
                     let _bytes_copied =
                         crate::kernel::copy_to_user(user_ptr, data.as_ptr(), rread.count as usize);
                     cursor += rread.count as u64;
+                    total_bytes_read += rread.count;
                 }
                 P9Response::Error(_rlerror) => {
                     if _rlerror.ecode == 0 {
-                        return Ok(0);
+                        return Ok(total_bytes_read);
                     }
                     return Err(Err::NoSys);
                 }
             }
         }
-        return Ok(0);
+        return Ok(total_bytes_read);
     }
     Err(Err::NoSys)
 }
@@ -1353,9 +1351,34 @@ pub fn sys_ioctl(fd: u32, _cmd: u32, arg: u32) -> Result<u32, Err> {
 }
 
 pub fn sys_pread64(_fd: u32, _buf: u32, _count: u32, _pos: u32) -> Result<u32, Err> {
-    let msg = b"sys_pread64 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    kprint!(
+        "sys_pread64: fd={}, buf=0x{:08x}, count={}, pos={}",
+        _fd,
+        _buf,
+        _count,
+        _pos
+    );
+
+    // pread64 reads from a specific offset without changing the file position
+    // We need to: save current position, seek to offset, read, restore position
+
+    // Get current file position
+    let current_pos = unsafe { FD_TABLE[_fd as usize].cursor };
+
+    // Seek to requested offset (note: _pos is already the offset, not pgoffset)
+    unsafe {
+        FD_TABLE[_fd as usize].cursor = _pos as u64;
+    }
+
+    // Do the read
+    let result = sys_read(_fd, _buf, _count);
+
+    // Restore original file position
+    unsafe {
+        FD_TABLE[_fd as usize].cursor = current_pos;
+    }
+
+    result
 }
 
 pub fn sys_readahead(_fd: u32, _offset: u32, _count: u32) -> Result<u32, Err> {
@@ -2106,13 +2129,27 @@ pub fn sys_statx(
     // convert the filename, it's a 0-terminated utf-8 string
     let filename = str::from_utf8(filename).unwrap();
     kprint!("sys_statx: filename = {}", filename);
-    // if the first character is / it's a absolute path, otherwise it's a relative path
 
-    let (dir_fid, file_name) = get_dir_fid_into_temp_fid(_dfd, filename)?;
+    // AT_EMPTY_PATH flag (0x1000) - if filename is empty, stat the fd itself
+    const AT_EMPTY_PATH: u32 = 0x1000;
 
-    resolve_file_to_fid(dir_fid, 0xFFFF_FFFE, &file_name)?;
+    let target_fid = if (_flags & AT_EMPTY_PATH) != 0 && filename.is_empty() {
+        // Stat the file descriptor itself
+        kprint!("sys_statx: AT_EMPTY_PATH set, statting fd {}", _dfd);
+        let fd_entry = get_fd(_dfd);
+        if fd_entry.fid == 0 {
+            kprint!("sys_statx: invalid fd {}", _dfd);
+            return Err(Err::Inval);
+        }
+        fd_entry.fid
+    } else {
+        // Normal path resolution
+        let (dir_fid, file_name) = get_dir_fid_into_temp_fid(_dfd, filename)?;
+        resolve_file_to_fid(dir_fid, 0xFFFF_FFFE, &file_name)?;
+        0xFFFF_FFFE
+    };
 
-    let tgetattr = crate::p9::TgetattrMessage::new(0, 0xFFFF_FFFE, P9_GETATTR_ALL);
+    let tgetattr = crate::p9::TgetattrMessage::new(0, target_fid, P9_GETATTR_ALL);
     match tgetattr.send_tgetattr() {
         Ok(bytes_written) => {
             kprint!("sys_statx: bytes_written = {}", bytes_written);
@@ -2146,7 +2183,9 @@ pub fn sys_statx(
             }
 
             kprint!("sys_statx: successfully filled statx buffer");
-            clunk(0xFFFF_FFFE, false);
+            if target_fid == 0xFFFF_FFFE {
+                clunk(0xFFFF_FFFE, false);
+            }
             Ok(0) // Success
         }
         P9Response::Error(rlerror) => {
@@ -2155,7 +2194,9 @@ pub fn sys_statx(
                 rlerror.tag,
                 rlerror.ecode
             );
-            clunk(0xFFFF_FFFE, false);
+            if target_fid == 0xFFFF_FFFE {
+                clunk(0xFFFF_FFFE, false);
+            }
             Ok(-(rlerror.ecode as i32) as u32)
         }
     }

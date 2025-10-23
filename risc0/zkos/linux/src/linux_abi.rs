@@ -102,7 +102,7 @@ use alloc::vec::Vec;
 
 use core::{alloc::Layout, ptr::NonNull};
 
-static mut MMAP_BASE: u32 = 0x8000_0000;
+static mut MMAP_BASE: u32 = 0x94800000;
 
 fn get_mmap_base() -> u32 {
     unsafe { MMAP_BASE }
@@ -566,6 +566,16 @@ pub fn start_linux_binary(argc: u32) -> ! {
     let interp_base_addr = unsafe { USER_INTERP_BASE_ADDR.read_volatile() };
     let interp_addr = unsafe { USER_INTERP_ADDR.read_volatile() };
 
+    // Set mmap_base to start of interpreter (for top-down allocation below it)
+    // The interpreter was placed to end at the initial mmap_base (0x94800000),
+    // so we need to set mmap_base to its start address to avoid overlap with
+    // future mmap allocations (which grow downward from mmap_base)
+    if interp_base_addr != 0 {
+        // 0x3000 is vvar, vdso, to align with memory offsets in real rv32
+        let mmap_base = interp_base_addr as u32 - 0x3000;
+        set_mmap_base(interp_base_addr as u32);
+    }
+
     for arg in &argv {
         stack.add_str(arg.as_bytes());
     }
@@ -586,7 +596,7 @@ pub fn start_linux_binary(argc: u32) -> ! {
     // auxv[3]
     stack.add_aux_word(AuxType::EGid, 1);
 
-    let user_start_addr: usize = unsafe { USER_START_PTR.read_volatile() } - 4;
+    let user_start_addr: usize = unsafe { USER_START_PTR.read_volatile() };
 
     if interp_base_addr != 0 {
         stack.add_aux_word(AuxType::Entry, user_start_addr);
@@ -619,13 +629,19 @@ pub fn start_linux_binary(argc: u32) -> ! {
             "starting linux binary with interpreter at 0x{:08x}",
             interp_addr,
         );
+        kprint!("AT_BASE (interp load addr) = 0x{:08x}", interp_base_addr);
+        kprint!("AT_ENTRY (main entry) = 0x{:08x}", user_start_addr);
+        kprint!("AT_PHDR (main phdr) = 0x{:08x}", unsafe {
+            USER_PHDR_ADDR_PTR.read_volatile()
+        });
         unsafe {
             MEPC_PTR.write_volatile(interp_addr - 4);
         }
     } else {
         print("starting linux binary");
         unsafe {
-            MEPC_PTR.write_volatile(user_start_addr);
+            // Apply -4 adjustment for MEPC circuit bug
+            MEPC_PTR.write_volatile(user_start_addr - 4);
         }
     }
     mret()
@@ -1128,7 +1144,21 @@ fn sys_mmap(
         kprint!("sys_mmap: new mmap base = {:08x}", new_mmap_base);
         set_mmap_base(new_mmap_base);
         let ptr: *mut u8 = new_mmap_base as *mut u8;
-        read_file_to_user_memory(fd, ptr as u32, len, offset)?;
+        let bytes_read = read_file_to_user_memory(fd, ptr as u32, len, offset)?;
+        // Zero-fill beyond EOF up to aligned length (Linux behavior)
+        if bytes_read < aligned_length as u32 {
+            let zero_len = aligned_length - bytes_read as usize;
+            unsafe {
+                let zero_start = ptr.add(bytes_read as usize);
+                zero_start.write_bytes(0, zero_len);
+            }
+            kprint!(
+                "sys_mmap: zero-filled from {:08x} to {:08x} ({} bytes beyond EOF)",
+                ptr as u32 + bytes_read,
+                ptr as u32 + aligned_length as u32,
+                zero_len
+            );
+        }
         Ok(ptr as u32)
     } else if _fd != -1 && _flags & MAP_FIXED == MAP_FIXED && _addr != 0 {
         kprint!(
@@ -1138,7 +1168,22 @@ fn sys_mmap(
             get_mmap_base()
         );
         let ptr: *mut u8 = _addr as *mut u8;
-        read_file_to_user_memory(fd, _addr, len, offset)?;
+        let aligned_length = align_up(len as usize, PAGE_SIZE);
+        let bytes_read = read_file_to_user_memory(fd, _addr, len, offset)?;
+        // Zero-fill beyond EOF up to aligned length (Linux behavior)
+        if bytes_read < aligned_length as u32 {
+            let zero_len = aligned_length - bytes_read as usize;
+            unsafe {
+                let zero_start = ptr.add(bytes_read as usize);
+                zero_start.write_bytes(0, zero_len);
+            }
+            kprint!(
+                "sys_mmap: zero-filled from {:08x} to {:08x} ({} bytes beyond EOF)",
+                _addr + bytes_read,
+                _addr + aligned_length as u32,
+                zero_len
+            );
+        }
         if _addr + len < get_mmap_base() {
             kpanic!("sys_mmap: mmap base + len < get_mmap_base()");
         }
@@ -1260,5 +1305,6 @@ fn sys_getuid() -> Result<u32, Err> {
 }
 
 fn sys_getpid() -> Result<u32, Err> {
+    kprint!("sys_getpid: returning 1");
     Ok(1)
 }
