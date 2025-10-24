@@ -698,7 +698,7 @@ pub fn handle_linux_syscall() -> ! {
         SYS_EXECVE => syscall3(sys_execve),
         SYS_EXECVEAT => syscall5(sys_execveat),
         SYS_FACCESSAT => syscall3(sys_faccessat),
-        SYS_FACCESSAT2 => syscall3(sys_faccessat2),
+        SYS_FACCESSAT2 => syscall4(sys_faccessat2),
         SYS_FADVISE64_64 => syscall4(sys_fadvise64_64),
         SYS_FALLOCATE => syscall4(sys_fallocate),
         SYS_FANOTIFY_INIT => syscall2(sys_fanotify_init),

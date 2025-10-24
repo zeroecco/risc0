@@ -383,12 +383,29 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
         }
         match RreadMessage::read_response() {
             P9Response::Success(rread) => {
+                kprint!("sys_read: received {} bytes from 9P", rread.count);
                 let user_ptr = _buf as *mut u8;
                 let data = rread.data;
+
+                if rread.count == 0 {
+                    kprint!("sys_read: read 0 bytes (EOF)");
+                    return Ok(0);
+                }
+
+                kprint!(
+                    "sys_read: copying {} bytes to user buffer 0x{:08x}",
+                    rread.count,
+                    _buf
+                );
                 let bytes_copied =
                     crate::kernel::copy_to_user(user_ptr, data.as_ptr(), rread.count as usize);
+
                 if bytes_copied == 0 {
-                    kprint!("sys_read: failed to copy data to user memory");
+                    kprint!(
+                        "sys_read: copy_to_user failed! dst=0x{:08x}, len={}",
+                        _buf,
+                        rread.count
+                    );
                     return Err(Err::NoSys);
                 }
                 let mut updated_entry = fd_entry;
@@ -640,15 +657,84 @@ pub fn sys_dup3(_oldfd: u32, _newfd: u32, _flags: u32) -> Result<u32, Err> {
 }
 
 pub fn sys_faccessat(_dfd: u32, _filename: u32, _mode: u32) -> Result<u32, Err> {
-    let msg = b"sys_faccessat not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    // faccessat calls faccessat2 with no flags
+    sys_faccessat2(_dfd, _filename, _mode, 0)
 }
 
-pub fn sys_faccessat2(_dfd: u32, _filename: u32, _mode: u32) -> Result<u32, Err> {
-    let msg = b"sys_faccessat2 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_faccessat2(_dfd: u32, _filename: u32, _mode: u32, _flags: u32) -> Result<u32, Err> {
+    // faccessat2 checks if a file can be accessed with the given mode
+    // mode bits: R_OK (4), W_OK (2), X_OK (1), F_OK (0 - existence only)
+    // Flags: AT_EACCESS (0x200), AT_SYMLINK_NOFOLLOW (0x100), AT_EMPTY_PATH (0x1000)
+
+    if !get_p9_enabled() {
+        let msg = b"sys_faccessat2: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    const AT_EACCESS: u32 = 0x200;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+
+    // Parse filename
+    let filename = unsafe { core::slice::from_raw_parts(_filename as *const u8, 256) };
+    let null_pos = filename
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(filename.len());
+    let filename_str = str::from_utf8(&filename[..null_pos]).map_err(|_| Err::Inval)?;
+
+    kprint!(
+        "sys_faccessat2: dfd={}, filename='{}', mode=0x{:x}, flags=0x{:x}",
+        _dfd,
+        filename_str,
+        _mode,
+        _flags
+    );
+
+    if (_flags & AT_EACCESS) != 0 {
+        kprint!("sys_faccessat2: AT_EACCESS set (using effective uid/gid)");
+        // In zkVM context, we don't distinguish between real and effective uid/gid
+    }
+
+    if (_flags & AT_SYMLINK_NOFOLLOW) != 0 {
+        kprint!("sys_faccessat2: AT_SYMLINK_NOFOLLOW set");
+        // TODO: when checking access, don't follow symlinks
+    }
+
+    // Handle AT_EMPTY_PATH - check access on the fd itself
+    if (_flags & AT_EMPTY_PATH) != 0 && filename_str.is_empty() {
+        kprint!("sys_faccessat2: AT_EMPTY_PATH set, checking fd {}", _dfd);
+        let fd_entry = get_fd(_dfd);
+        if fd_entry.fid != 0 {
+            // File descriptor is valid and open - access granted
+            Ok(0)
+        } else {
+            // Invalid file descriptor
+            Err(Err::Inval)
+        }
+    } else {
+        // Normal path-based access check
+        let (dir_fid, file_name) = get_dir_fid_into_temp_fid(_dfd, filename_str)?;
+
+        match resolve_file_to_fid(dir_fid, 0xFFFF_FFFE, &file_name) {
+            Ok(_) => {
+                // File exists and is accessible
+                clunk(0xFFFF_FFFE, false);
+                if dir_fid == 0xFFFF_FFFE {
+                    clunk(dir_fid, false);
+                }
+                Ok(0)
+            }
+            Err(_) => {
+                // File not found or not accessible
+                if dir_fid == 0xFFFF_FFFE {
+                    clunk(dir_fid, false);
+                }
+                Err(Err::FileNotFound)
+            }
+        }
+    }
 }
 
 pub fn sys_fadvise64_64(_fd: u32, _offset: u32, _len: u32, _advice: u32) -> Result<u32, Err> {
