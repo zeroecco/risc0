@@ -686,7 +686,10 @@ pub fn sys_chdir(filename: u32) -> Result<u32, Err> {
 fn dup_fid_to(fid: u32, fid_to: u32) -> Result<u32, Err> {
     let walk_result = do_walk(fid, fid_to, vec![]);
     match walk_result {
-        Ok((ret_code, _)) => Ok(ret_code),
+        Ok(_) => {
+            // Walk succeeded, return the new fid (fid_to), not the return code
+            Ok(fid_to)
+        }
         Err(e) => {
             kprint!("dup_fid_to: error dupping: {:?}", e.as_errno());
             clunk(fid_to, false);
@@ -701,15 +704,38 @@ pub fn sys_dup(fd: u32) -> Result<u32, Err> {
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
     }
+    // Check if fd is out of range (including negative values cast to u32)
     if fd >= 256 {
-        return Err(Err::Inval);
+        kprint!("sys_dup: fd {} is out of range", fd);
+        return Err(Err::BadFd);
     }
     // diod/p9 protocol "fid can be cloned to newfid by calling walk with nwname set to zero."
     let fd_entry = get_fd(fd);
+    if fd_entry.fid == 0 {
+        kprint!("sys_dup: fd {} is not open", fd);
+        return Err(Err::BadFd);
+    }
     let fid = fd_entry.fid;
     let new_fd = find_free_fd()?;
     if let Ok(new_fid) = dup_fid_to(fid, new_fd) {
-        set_fd(new_fd, new_fid);
+        // Copy all fields from the original descriptor, not just the fid
+        update_fd(
+            new_fd,
+            FileDescriptor {
+                fid: new_fid,
+                cursor: fd_entry.cursor,
+                is_dir: fd_entry.is_dir,
+                mode: fd_entry.mode,
+                flags: fd_entry.flags,
+            },
+        );
+        kprint!(
+            "sys_dup: duplicated fd {} (fid={}) to fd {} (fid={})",
+            fd,
+            fid,
+            new_fd,
+            new_fid
+        );
         Ok(new_fd)
     } else {
         Err(Err::NoSys)
