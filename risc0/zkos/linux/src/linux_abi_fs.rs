@@ -92,6 +92,7 @@ pub struct FileDescriptor {
     #[allow(dead_code)]
     pub is_dir: bool,
     pub mode: u32,
+    pub flags: u32, // Linux open flags (O_APPEND, etc.)
 }
 
 pub static mut FD_TABLE: [FileDescriptor; 256] = [FileDescriptor {
@@ -99,6 +100,7 @@ pub static mut FD_TABLE: [FileDescriptor; 256] = [FileDescriptor {
     cursor: 0,
     is_dir: false,
     mode: 0xFFFF_FFFF,
+    flags: 0,
 }; 256];
 
 pub fn get_fd(fd: u32) -> FileDescriptor {
@@ -306,6 +308,7 @@ pub fn sys_close(_fd: u32) -> Result<u32, Err> {
                 cursor: 0,
                 is_dir: false,
                 mode: 0xFFFF_FFFF,
+                flags: 0,
             },
         );
         Ok(0)
@@ -477,10 +480,37 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
         }
         let mut fd_entry = get_fd(fd as u32);
         if fd_entry.fid != 0 {
+            // Handle O_APPEND: position at end of file before each write
+            const O_APPEND: u32 = 0o2000;
+            let mut current_cursor = fd_entry.cursor;
+
+            if (fd_entry.flags & O_APPEND) == O_APPEND {
+                // Get file size using getattr
+                let tgetattr = crate::p9::TgetattrMessage::new(0, fd_entry.fid, P9_GETATTR_SIZE);
+                match tgetattr.send_tgetattr() {
+                    Ok(_) => match RgetattrMessage::read_response() {
+                        P9Response::Success(rgetattr) => {
+                            current_cursor = rgetattr.size;
+                            kprint!(
+                                "do_write: O_APPEND - setting cursor to end of file: {}",
+                                current_cursor
+                            );
+                        }
+                        P9Response::Error(_) => {
+                            kprint!("do_write: error getting file size for O_APPEND");
+                            return Err(Err::NoSys);
+                        }
+                    },
+                    Err(_) => {
+                        kprint!("do_write: error sending getattr for O_APPEND");
+                        return Err(Err::NoSys);
+                    }
+                }
+            }
+
             // Write in chunks of 512 bytes
             const CHUNK_SIZE: usize = 512;
             let mut total_written = 0;
-            let mut current_cursor = fd_entry.cursor;
 
             let data = unsafe { core::slice::from_raw_parts(buf, count) };
 
@@ -1223,10 +1253,11 @@ pub fn sys_llseek(
 
     let fd_entry = get_fd(_fd);
     let mut updated_entry = fd_entry;
+    let offset = ((_offset_high as u64) << 32) | (_offset_low as u64);
     let new_cursor = match whence {
-        SEEK_SET => (_offset_high as u64) << 32 | _offset_low as u64,
-        SEEK_CUR => (fd_entry.cursor + (_offset_high as u64)) << 32 | _offset_low as u64,
-        SEEK_END => (fd_entry.cursor + (_offset_high as u64)) << 32 | _offset_low as u64,
+        SEEK_SET => offset,
+        SEEK_CUR => fd_entry.cursor + offset,
+        SEEK_END => fd_entry.cursor + offset, // TODO: should add to file size, not cursor
         _ => {
             let msg = b"sys_llseek: invalid whence";
             host_log(msg.as_ptr(), msg.len());
@@ -1691,6 +1722,7 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
                 cursor: fd.cursor,
                 is_dir: false,
                 mode: fd.mode,
+                flags: fd.flags,
             },
         );
         if fd.mode != 0xFFFF_FFFF {
@@ -2187,6 +2219,7 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                         unsafe {
                             FD_TABLE[file_fid as usize].mode = p9_flags;
                             FD_TABLE[file_fid as usize].is_dir = is_directory;
+                            FD_TABLE[file_fid as usize].flags = _flags;
                         }
                         Ok(file_fid)
                     }
@@ -2229,6 +2262,7 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                         unsafe {
                             FD_TABLE[file_fid as usize].mode = p9_flags;
                             FD_TABLE[file_fid as usize].is_dir = is_directory;
+                            FD_TABLE[file_fid as usize].flags = _flags;
                         }
                         Ok(file_fid)
                     }
@@ -2544,6 +2578,7 @@ pub fn set_fd(fd: u32, fid: u32) {
             cursor: 0,
             is_dir: false,
             mode: 0xFFFF_FFFF,
+            flags: 0,
         },
     );
 }
