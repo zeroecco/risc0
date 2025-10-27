@@ -432,11 +432,14 @@ pub const SYS_WAITID: u32 = 95;
 
 #[derive(Clone, Copy)]
 pub enum Err {
-    NoMem = -12,
-    Inval = -22,
-    FileNotFound = -2,
-    FileExists = -17,
-    NoSys = -38, // ENOSYS - Function not implemented
+    FileNotFound = -2, // ENOENT
+    BadFd = -9,        // EBADF - Bad file descriptor
+    NoMem = -12,       // ENOMEM
+    Fault = -14,       // EFAULT - Bad address
+    FileExists = -17,  // EEXIST
+    IsDir = -21,       // EISDIR - Is a directory
+    Inval = -22,       // EINVAL
+    NoSys = -38,       // ENOSYS - Function not implemented
 }
 
 impl Err {
@@ -1095,6 +1098,7 @@ fn sys_mmap(
 
     let offset = pgoffset as u64 * PAGE_SIZE as u64;
     const MAP_FIXED: u32 = 0x10;
+    const MAP_ANONYMOUS: u32 = 0x20;
     if _flags & MAP_FIXED == MAP_FIXED {
         kprint!("sys_mmap: MAP_FIXED is set");
     }
@@ -1108,7 +1112,10 @@ fn sys_mmap(
         return Err(Err::Inval);
     }
 
-    if _fd == -1 && _flags & MAP_FIXED != MAP_FIXED {
+    // Check for anonymous mapping (either fd == -1 OR MAP_ANONYMOUS flag is set)
+    let is_anonymous = _fd == -1 || (_flags & MAP_ANONYMOUS == MAP_ANONYMOUS);
+
+    if is_anonymous && _flags & MAP_FIXED != MAP_FIXED {
         let mmap_base = get_mmap_base();
         let aligned_length = align_up(len as usize, PAGE_SIZE);
         // mmap grows down
@@ -1128,7 +1135,7 @@ fn sys_mmap(
         kprint!("sys_mmap: new mmap base = {:08x}", new_mmap_base);
         set_mmap_base(new_mmap_base);
         Ok(ptr as u32)
-    } else if _fd != -1 && _flags & MAP_FIXED != MAP_FIXED {
+    } else if !is_anonymous && _flags & MAP_FIXED != MAP_FIXED {
         let mmap_base = get_mmap_base();
         let aligned_length = align_up(len as usize, PAGE_SIZE);
         // mmap grows down
@@ -1160,7 +1167,7 @@ fn sys_mmap(
             );
         }
         Ok(ptr as u32)
-    } else if _fd != -1 && _flags & MAP_FIXED == MAP_FIXED && _addr != 0 {
+    } else if !is_anonymous && _flags & MAP_FIXED == MAP_FIXED && _addr != 0 {
         kprint!(
             "sys_mmap: wishing {:08x}-{:08x} to be mapped, and our mmap base is {:08x}",
             _addr,
@@ -1189,7 +1196,7 @@ fn sys_mmap(
         }
         kprint!("sys_mmap: returning {:08x}", ptr as u32);
         Ok(ptr as u32)
-    } else if _fd == -1 && _flags & MAP_FIXED == MAP_FIXED && _addr != 0 {
+    } else if is_anonymous && _flags & MAP_FIXED == MAP_FIXED && _addr != 0 {
         let ptr: *mut u8 = _addr as *mut u8;
         let aligned_length = align_up(len as usize, PAGE_SIZE);
         unsafe {

@@ -293,6 +293,9 @@ pub fn init_fs() {
 }
 
 pub fn sys_close(_fd: u32) -> Result<u32, Err> {
+    if _fd >= 256 {
+        return Err(Err::BadFd);
+    }
     let fd_entry = get_fd(_fd);
     if fd_entry.fid != 0xFFFF_FFFE && fd_entry.fid != 0 {
         clunk(fd_entry.fid, false);
@@ -307,11 +310,14 @@ pub fn sys_close(_fd: u32) -> Result<u32, Err> {
         );
         Ok(0)
     } else {
-        Err(Err::NoSys)
+        Err(Err::BadFd)
     }
 }
 
 pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> Result<u32, Err> {
+    if fd >= 256 {
+        return Err(Err::Inval);
+    }
     let fd_entry = get_fd(fd);
     if fd_entry.fid != 0 {
         let mut cursor = offset;
@@ -363,13 +369,38 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
 }
 
 pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
+    // Check for NULL buffer
+    if _buf == 0 {
+        return Err(Err::Fault);
+    }
+
     if !get_p9_enabled() {
         let msg = b"sys_read: p9 is not enabled";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
     }
+
+    // Validate file descriptor is within range
+    if _fd >= 256 {
+        kprint!("sys_read: invalid fd={}", _fd);
+        return Err(Err::BadFd);
+    }
+
     kprint!("sys_read: _fd={} _buf={} _count={}", _fd, _buf, _count);
     let fd_entry = get_fd(_fd);
+
+    // Check if fd is closed/invalid
+    if fd_entry.fid == 0 {
+        kprint!("sys_read: fd={} is not open", _fd);
+        return Err(Err::BadFd);
+    }
+
+    // Check if fd is a directory
+    if fd_entry.is_dir {
+        kprint!("sys_read: fd={} is a directory", _fd);
+        return Err(Err::IsDir);
+    }
+
     if fd_entry.fid != 0 {
         // read with Tread and Rread from the fid using 9p protocol and update .cursor in FD_TABLE
         let tread = TreadMessage::new(0, fd_entry.fid, fd_entry.cursor, _count);
@@ -428,9 +459,17 @@ pub fn sys_write(fd: u32, buf: u32, count: u32) -> Result<u32, Err> {
 }
 
 pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
+    // Check for NULL buffer
+    if buf.is_null() {
+        return Err(Err::Fault);
+    }
+
     if fd == 1 || fd == 2 {
         host_write(fd as u32, buf, count);
     } else {
+        if !(0..256).contains(&fd) {
+            return Err(Err::Inval);
+        }
         if !get_p9_enabled() {
             let msg = b"do_write: p9 is not enabled";
             host_log(msg.as_ptr(), msg.len());
@@ -510,12 +549,6 @@ pub fn sys_writev(fd: u32, vec_ptr: u32, vlen: u32) -> Result<u32, Err> {
     let fd = fd as i32;
     let vec_ptr = vec_ptr as *const IoVec;
     let vec = unsafe { core::slice::from_raw_parts(vec_ptr, vlen as usize) };
-    if fd > 2 {
-        // For file descriptors > 2 (not stdout/stderr), return not implemented for now.
-        let msg = b"sys_writev for fd > 2 not implemented";
-        host_log(msg.as_ptr(), msg.len());
-        return Err(Err::NoSys);
-    }
 
     let mut total: usize = 0;
     for iov in vec {
@@ -637,6 +670,9 @@ pub fn sys_dup(fd: u32) -> Result<u32, Err> {
         let msg = b"sys_dup: p9 is not enabled";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
+    }
+    if fd >= 256 {
+        return Err(Err::Inval);
     }
     // diod/p9 protocol "fid can be cloned to newfid by calling walk with nwname set to zero."
     let fd_entry = get_fd(fd);
@@ -772,6 +808,9 @@ pub fn sys_fchdir(fd: u32) -> Result<u32, Err> {
         let msg = b"sys_fchdir: p9 is not enabled";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
+    }
+    if fd >= 256 {
+        return Err(Err::Inval);
     }
     let fd_entry = get_fd(fd);
     if fd_entry.fid != 0 {
@@ -1006,6 +1045,11 @@ pub fn sys_ftruncate64(fd: u32, length: u32) -> Result<u32, Err> {
         return Err(Err::NoSys);
     }
 
+    if fd >= 256 {
+        kprint!("sys_ftruncate64: invalid file descriptor {}", fd);
+        return Err(Err::Inval);
+    }
+
     kprint!("sys_ftruncate64: fd={}, length={}", fd, length);
 
     // Get the file descriptor entry
@@ -1165,6 +1209,10 @@ pub fn sys_llseek(
         let msg = b"sys_llseek not implemented";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
+    }
+
+    if _fd >= 256 {
+        return Err(Err::Inval);
     }
 
     if whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END {
@@ -1437,6 +1485,10 @@ pub fn sys_ioctl(fd: u32, _cmd: u32, arg: u32) -> Result<u32, Err> {
 }
 
 pub fn sys_pread64(_fd: u32, _buf: u32, _count: u32, _pos: u32) -> Result<u32, Err> {
+    if _fd >= 256 {
+        return Err(Err::Inval);
+    }
+
     kprint!(
         "sys_pread64: fd={}, buf=0x{:08x}, count={}, pos={}",
         _fd,
@@ -1623,6 +1675,9 @@ pub fn sys_setxattrat(
 const F_DUPFD_CLOEXEC: u32 = 1030;
 
 pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
+    if _fd >= 256 {
+        return Err(Err::Inval);
+    }
     if _cmd == F_SETFD && _arg & FD_CLOEXEC == FD_CLOEXEC {
         // mock and return ok
         return Ok(0);
@@ -1677,6 +1732,10 @@ pub fn sys_getdents64(fd: u32, dirp: u32, count: u32) -> Result<u32, Err> {
         let msg = b"sys_getdents64: p9 is not enabled";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
+    }
+
+    if fd >= 256 {
+        return Err(Err::Inval);
     }
 
     let fd_entry = get_fd(fd);
@@ -2041,6 +2100,9 @@ fn get_starting_fid(_dfd: u32, filename_str: &str) -> Result<u32, Err> {
         // AT_FDCWD case
         Ok(get_cwd_fid())
     } else {
+        if !(0..256).contains(&_dfd) {
+            return Err(Err::Inval);
+        }
         let fid = get_fd(_dfd as u32).fid;
         if fid == 0 {
             return Err(Err::NoSys);
@@ -2120,9 +2182,11 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                 match RlopenMessage::read_response() {
                     P9Response::Success(rlopen) => {
                         kprint!("sys_openat: received Rlopen: {:?}", rlopen);
+                        let is_directory = rlopen.qid.is_dir();
                         set_fd(file_fid, file_fid);
                         unsafe {
                             FD_TABLE[file_fid as usize].mode = p9_flags;
+                            FD_TABLE[file_fid as usize].is_dir = is_directory;
                         }
                         Ok(file_fid)
                     }
@@ -2160,9 +2224,11 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                 match RlcreateMessage::read_response() {
                     P9Response::Success(rlcreate) => {
                         kprint!("sys_openat: received Rlcreate: {:?}", rlcreate);
+                        let is_directory = rlcreate.qid.is_dir();
                         set_fd(file_fid, file_fid);
                         unsafe {
                             FD_TABLE[file_fid as usize].mode = p9_flags;
+                            FD_TABLE[file_fid as usize].is_dir = is_directory;
                         }
                         Ok(file_fid)
                     }
@@ -2460,8 +2526,11 @@ fn convert_rgetattr_to_statx(rgetattr: &RgetattrMessage) -> Statx {
 // make a fd
 pub fn find_free_fd() -> u32 {
     let mut fd = 0;
-    while get_fd(fd).fid != 0 {
+    while fd < 256 && get_fd(fd).fid != 0 {
         fd += 1;
+    }
+    if fd >= 256 {
+        kpanic!("find_free_fd: no free file descriptors available");
     }
     fd
 }
