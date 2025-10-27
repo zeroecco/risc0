@@ -781,23 +781,23 @@ pub fn sys_faccessat2(_dfd: u32, _filename: u32, _mode: u32, _flags: u32) -> Res
         }
     } else {
         // Normal path-based access check
-        let (dir_fid, file_name) = get_dir_fid_into_temp_fid(_dfd, filename_str)?;
+        // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
+        let starting_fid = get_starting_fid(_dfd, filename_str)?;
+        let (dir_path, file_name) = split_path(filename_str);
+        let dir_path = normalize_path(&dir_path);
+        do_walk(starting_fid, 0xFFFF_FFFB, dir_path)?;
 
-        match resolve_file_to_fid(dir_fid, 0xFFFF_FFFE, &file_name) {
+        match resolve_file_to_fid(0xFFFF_FFFB, 0xFFFF_FFFA, &file_name) {
             Ok(_) => {
                 // File exists and is accessible
-                clunk(0xFFFF_FFFE, false);
-                if dir_fid == 0xFFFF_FFFE {
-                    clunk(dir_fid, false);
-                }
+                clunk(0xFFFF_FFFA, false);
+                clunk(0xFFFF_FFFB, false);
                 Ok(0)
             }
-            Err(_) => {
+            Err(e) => {
                 // File not found or not accessible
-                if dir_fid == 0xFFFF_FFFE {
-                    clunk(dir_fid, false);
-                }
-                Err(Err::FileNotFound)
+                clunk(0xFFFF_FFFB, false);
+                Err(e)
             }
         }
     }
@@ -1625,12 +1625,20 @@ pub fn sys_renameat2(
     );
 
     // Split paths into directory and filename components
-    let (old_dir_fid, old_name) = get_dir_fid_into_temp_fid(_olddirfd, oldpath_str)?;
-    let (new_dir_fid, new_name) = get_dir_fid_into_temp_fid(_newdirfd, newpath_str)?;
+    // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
+    let old_starting_fid = get_starting_fid(_olddirfd, oldpath_str)?;
+    let (old_dir_path, old_name) = split_path(oldpath_str);
+    let old_dir_path = normalize_path(&old_dir_path);
+    do_walk(old_starting_fid, 0xFFFF_FFFE, old_dir_path)?;
+
+    let new_starting_fid = get_starting_fid(_newdirfd, newpath_str)?;
+    let (new_dir_path, new_name) = split_path(newpath_str);
+    let new_dir_path = normalize_path(&new_dir_path);
+    do_walk(new_starting_fid, 0xFFFF_FFFB, new_dir_path)?;
 
     // Send Trenameat message
     let trenameat =
-        TrenameatMessage::new(0, old_dir_fid, old_name.to_string(), new_dir_fid, new_name);
+        TrenameatMessage::new(0, 0xFFFF_FFFE, old_name.to_string(), 0xFFFF_FFFB, new_name);
 
     match trenameat.send_trenameat() {
         Ok(_) => {
@@ -1638,12 +1646,8 @@ pub fn sys_renameat2(
         }
         Err(e) => {
             kprint!("sys_renameat2: error sending Trenameat: {:?}", e);
-            if old_dir_fid == 0xFFFF_FFFE {
-                clunk(old_dir_fid, false);
-            }
-            if new_dir_fid == 0xFFFF_FFFE {
-                clunk(new_dir_fid, false);
-            }
+            clunk(0xFFFF_FFFE, false);
+            clunk(0xFFFF_FFFB, false);
             return Err(Err::NoSys);
         }
     }
@@ -1652,22 +1656,14 @@ pub fn sys_renameat2(
     match RrenameatMessage::read_response() {
         P9Response::Success(_rrenameat) => {
             kprint!("sys_renameat2: rename successful");
-            if old_dir_fid == 0xFFFF_FFFE {
-                clunk(old_dir_fid, false);
-            }
-            if new_dir_fid == 0xFFFF_FFFE {
-                clunk(new_dir_fid, false);
-            }
+            clunk(0xFFFF_FFFE, false);
+            clunk(0xFFFF_FFFB, false);
             Ok(0)
         }
         P9Response::Error(rlerror) => {
             kprint!("sys_renameat2: received Rlerror: ecode={}", rlerror.ecode);
-            if old_dir_fid == 0xFFFF_FFFE {
-                clunk(old_dir_fid, false);
-            }
-            if new_dir_fid == 0xFFFF_FFFE {
-                clunk(new_dir_fid, false);
-            }
+            clunk(0xFFFF_FFFE, false);
+            clunk(0xFFFF_FFFB, false);
             Ok(-(rlerror.ecode as i32) as u32)
         }
     }
@@ -2143,12 +2139,14 @@ fn get_starting_fid(_dfd: u32, filename_str: &str) -> Result<u32, Err> {
     }
 }
 
+#[allow(dead_code)]
 fn get_dir_fid_into_temp_fid(dfd: u32, filename_str: &str) -> Result<(u32, String), Err> {
     let starting_fid = get_starting_fid(dfd, filename_str)?;
     let (dir_path, file_name) = split_path(filename_str);
     let dir_path = normalize_path(&dir_path);
-    do_walk(starting_fid, 0xFFFF_FFFE, dir_path)?;
-    Ok((0, file_name))
+    // Use temp fid that doesn't conflict with CWD (0xFFFF_FFFD)
+    do_walk(starting_fid, 0xFFFF_FFFB, dir_path)?;
+    Ok((0xFFFF_FFFB, file_name))
 }
 
 fn resolve_file_to_fid(dir_fid: u32, new_fid: u32, filename: &str) -> Result<u32, Err> {
@@ -2183,6 +2181,7 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
 
     const O_CREAT: u32 = 0o100;
     const O_EXCL: u32 = 0o200;
+    const O_TRUNC: u32 = 0o1000;
     let p9_flags = if (_flags & 0o3) == 0o0 {
         0
     }
@@ -2221,6 +2220,47 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                             FD_TABLE[file_fid as usize].is_dir = is_directory;
                             FD_TABLE[file_fid as usize].flags = _flags;
                         }
+
+                        // Handle O_TRUNC: truncate file to 0 bytes after opening
+                        if (_flags & O_TRUNC) == O_TRUNC {
+                            kprint!("sys_openat: O_TRUNC detected, truncating file to 0 bytes");
+                            let valid = P9SetattrMask::Size as u32;
+                            let tsetattr = TsetattrMessage::new(
+                                0,        // tag
+                                file_fid, // fid
+                                valid,    // valid mask (only Size)
+                                0,        // mode (not changing)
+                                0,        // uid (not changing)
+                                0,        // gid (not changing)
+                                0,        // size (truncate to 0)
+                                0,        // atime_sec (not changing)
+                                0,        // atime_nsec (not changing)
+                                0,        // mtime_sec (not changing)
+                                0,        // mtime_nsec (not changing)
+                            );
+
+                            match tsetattr.send_tsetattr() {
+                                Ok(_) => match RsetattrMessage::read_response() {
+                                    P9Response::Success(_) => {
+                                        kprint!("sys_openat: file truncated successfully");
+                                    }
+                                    P9Response::Error(rlerror) => {
+                                        kprint!(
+                                            "sys_openat: error truncating file: ecode={}",
+                                            rlerror.ecode
+                                        );
+                                        clunk(file_fid, false);
+                                        return Ok(-(rlerror.ecode as i32) as u32);
+                                    }
+                                },
+                                Err(e) => {
+                                    kprint!("sys_openat: error sending Tsetattr: {:?}", e);
+                                    clunk(file_fid, false);
+                                    return Err(Err::NoSys);
+                                }
+                            }
+                        }
+
                         Ok(file_fid)
                     }
                     P9Response::Error(rlerror) => {
@@ -2331,6 +2371,7 @@ fn normalize_path(path: &str) -> Vec<String> {
     new_path
 }
 
+#[allow(dead_code)]
 fn get_file_size(starting_fid: u32, path: &str, depth: u32) -> Result<u64, Err> {
     if depth > 40 {
         // don't let it recurse too much
@@ -2408,8 +2449,13 @@ pub fn sys_statx(
         fd_entry.fid
     } else {
         // Normal path resolution
-        let (dir_fid, file_name) = get_dir_fid_into_temp_fid(_dfd, filename)?;
-        resolve_file_to_fid(dir_fid, 0xFFFF_FFFE, &file_name)?;
+        // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
+        let starting_fid = get_starting_fid(_dfd, filename)?;
+        let (dir_path, file_name) = split_path(filename);
+        let dir_path = normalize_path(&dir_path);
+        do_walk(starting_fid, 0xFFFF_FFFB, dir_path)?;
+        resolve_file_to_fid(0xFFFF_FFFB, 0xFFFF_FFFE, &file_name)?;
+        clunk(0xFFFF_FFFB, false); // Clean up directory fid
         0xFFFF_FFFE
     };
 
