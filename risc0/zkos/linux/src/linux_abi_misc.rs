@@ -847,15 +847,71 @@ pub fn sys_prctl(_option: u32, _arg2: u32, _arg3: u32, _arg4: u32, _arg5: u32) -
     Err(Err::NoSys)
 }
 
+// rlimit structure for prlimit64
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct Rlimit64 {
+    rlim_cur: u64, // Soft limit
+    rlim_max: u64, // Hard limit
+}
+
 pub fn sys_prlimit64(
     _pid: u32,
-    _resource: u32,
+    resource: u32,
     _new_limit: u32,
-    _old_limit: u32,
+    old_limit: u32,
 ) -> Result<u32, Err> {
-    let msg = b"sys_prlimit64 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    const RLIMIT_NOFILE: u32 = 7; // Max number of open file descriptors
+
+    kprint!(
+        "sys_prlimit64: pid={}, resource={}, new_limit=0x{:08x}, old_limit=0x{:08x}",
+        _pid,
+        resource,
+        _new_limit,
+        old_limit
+    );
+
+    // Only handle RLIMIT_NOFILE for now
+    if resource != RLIMIT_NOFILE {
+        let msg = b"sys_prlimit64: only RLIMIT_NOFILE is supported";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Return our current fd limit (256)
+    if old_limit != 0 {
+        let rlimit = Rlimit64 {
+            rlim_cur: 256, // Soft limit
+            rlim_max: 256, // Hard limit
+        };
+
+        let rlimit_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &rlimit as *const Rlimit64 as *const u8,
+                core::mem::size_of::<Rlimit64>(),
+            )
+        };
+
+        let bytes_copied = crate::kernel::copy_to_user(
+            old_limit as *mut u8,
+            rlimit_bytes.as_ptr(),
+            core::mem::size_of::<Rlimit64>(),
+        );
+
+        if bytes_copied == 0 {
+            kprint!("sys_prlimit64: failed to copy rlimit to user memory");
+            return Err(Err::Fault);
+        }
+
+        kprint!("sys_prlimit64: returned rlim_cur=256, rlim_max=256");
+    }
+
+    // Ignore new_limit - we don't allow changing the limit
+    if _new_limit != 0 {
+        kprint!("sys_prlimit64: ignoring new_limit (not supported)");
+    }
+
+    Ok(0)
 }
 
 pub fn sys_process_madvise(

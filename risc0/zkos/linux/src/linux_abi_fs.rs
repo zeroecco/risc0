@@ -707,7 +707,7 @@ pub fn sys_dup(fd: u32) -> Result<u32, Err> {
     // diod/p9 protocol "fid can be cloned to newfid by calling walk with nwname set to zero."
     let fd_entry = get_fd(fd);
     let fid = fd_entry.fid;
-    let new_fd = find_free_fd();
+    let new_fd = find_free_fd()?;
     if let Ok(new_fid) = dup_fid_to(fid, new_fd) {
         set_fd(new_fd, new_fid);
         Ok(new_fd)
@@ -2194,7 +2194,7 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
         2
     }; // O_RDWR
 
-    let file_fid = find_free_fd();
+    let file_fid = find_free_fd()?;
 
     if resolve_path(dfd, filename_str, file_fid).is_ok() {
         if (_flags & O_CREAT) == O_CREAT && (_flags & O_EXCL) == O_EXCL {
@@ -2604,15 +2604,16 @@ fn convert_rgetattr_to_statx(rgetattr: &RgetattrMessage) -> Statx {
 }
 
 // make a fd
-pub fn find_free_fd() -> u32 {
+pub fn find_free_fd() -> Result<u32, Err> {
     let mut fd = 0;
     while fd < 256 && get_fd(fd).fid != 0 {
         fd += 1;
     }
     if fd >= 256 {
-        kpanic!("find_free_fd: no free file descriptors available");
+        kprint!("find_free_fd: no free file descriptors available");
+        return Err(Err::MFile);
     }
-    fd
+    Ok(fd)
 }
 
 #[allow(dead_code)]
