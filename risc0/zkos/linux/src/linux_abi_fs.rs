@@ -1865,8 +1865,21 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
     if _fd >= 256 {
         return Err(Err::Inval);
     }
-    if _cmd == F_SETFD && _arg & FD_CLOEXEC == FD_CLOEXEC {
-        // mock and return ok
+
+    kprint!("sys_fcntl64: _fd={} _cmd={} _arg={}", _fd, _cmd, _arg);
+
+    if _cmd == F_GETFD {
+        // Get file descriptor flags (only FD_CLOEXEC is relevant)
+        // In our implementation, we don't currently track FD_CLOEXEC per-fd
+        // For now, return 0 (FD_CLOEXEC not set)
+        kprint!("sys_fcntl64: F_GETFD returning 0 (FD_CLOEXEC not set)");
+        return Ok(0);
+    } else if _cmd == F_SETFD {
+        // Set file descriptor flags
+        if _arg & FD_CLOEXEC == FD_CLOEXEC {
+            kprint!("sys_fcntl64: F_SETFD setting FD_CLOEXEC");
+        }
+        // We don't actually track FD_CLOEXEC, just return success
         return Ok(0);
     } else if _cmd == F_DUPFD_CLOEXEC {
         let fd = get_fd(_fd);
@@ -1909,7 +1922,9 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         );
         return Ok(_arg);
     }
-    kprint!("sys_fcntl64: _fd={} _cmd={} _arg={}", _fd, _cmd, _arg);
+
+    // Unsupported command
+    kprint!("sys_fcntl64: unsupported command {}", _cmd);
     let msg = b"sys_fcntl64 not implemented for this cmd/arg";
     host_log(msg.as_ptr(), msg.len());
     Err(Err::NoSys)
