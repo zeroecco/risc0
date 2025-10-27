@@ -717,35 +717,169 @@ pub fn sys_dup(fd: u32) -> Result<u32, Err> {
     }
     let fid = fd_entry.fid;
     let new_fd = find_free_fd()?;
-    if let Ok(new_fid) = dup_fid_to(fid, new_fd) {
-        // Copy all fields from the original descriptor, not just the fid
-        update_fd(
-            new_fd,
-            FileDescriptor {
-                fid: new_fid,
-                cursor: fd_entry.cursor,
-                is_dir: fd_entry.is_dir,
-                mode: fd_entry.mode,
-                flags: fd_entry.flags,
-            },
-        );
-        kprint!(
-            "sys_dup: duplicated fd {} (fid={}) to fd {} (fid={})",
-            fd,
-            fid,
-            new_fd,
-            new_fid
-        );
-        Ok(new_fd)
-    } else {
-        Err(Err::NoSys)
+    match dup_fid_to(fid, new_fd) {
+        Ok(new_fid) => {
+            // In 9P, walking creates a new fid but doesn't open it
+            // We need to open the new fid to make it usable for I/O
+            // The mode field already contains the 9P flags (0=RDONLY, 1=WRONLY, 2=RDWR)
+            let tlopen = crate::p9::TlopenMessage::new(0, new_fid, fd_entry.mode);
+
+            match tlopen.send_tlopen() {
+                Ok(_) => match crate::p9::RlopenMessage::read_response() {
+                    crate::p9::P9Response::Success(_) => {
+                        kprint!("sys_dup: opened new fid {} successfully", new_fid);
+                    }
+                    crate::p9::P9Response::Error(rlerror) => {
+                        kprint!("sys_dup: failed to open new fid: ecode={}", rlerror.ecode);
+                        clunk(new_fid, false);
+                        return Err(Err::NoSys);
+                    }
+                },
+                Err(_) => {
+                    kprint!("sys_dup: failed to send Tlopen");
+                    clunk(new_fid, false);
+                    return Err(Err::NoSys);
+                }
+            }
+
+            // Copy all fields from the original descriptor
+            update_fd(
+                new_fd,
+                FileDescriptor {
+                    fid: new_fid,
+                    cursor: fd_entry.cursor,
+                    is_dir: fd_entry.is_dir,
+                    mode: fd_entry.mode,
+                    flags: fd_entry.flags,
+                },
+            );
+            kprint!(
+                "sys_dup: duplicated fd {} (fid={}) to fd {} (fid={})",
+                fd,
+                fid,
+                new_fd,
+                new_fid
+            );
+            Ok(new_fd)
+        }
+        Err(e) => {
+            kprint!("sys_dup: dup_fid_to failed: {:?}", e.as_errno());
+            Err(e)
+        }
     }
 }
 
-pub fn sys_dup3(_oldfd: u32, _newfd: u32, _flags: u32) -> Result<u32, Err> {
-    let msg = b"sys_dup3 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        let msg = b"sys_dup3: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    kprint!(
+        "sys_dup3: oldfd={}, newfd={}, flags={}",
+        oldfd,
+        newfd,
+        flags
+    );
+
+    // Validate file descriptors are in range
+    if oldfd >= 256 {
+        kprint!("sys_dup3: oldfd {} is out of range", oldfd);
+        return Err(Err::BadFd);
+    }
+    if newfd >= 256 {
+        kprint!("sys_dup3: newfd {} is out of range", newfd);
+        return Err(Err::BadFd);
+    }
+
+    // Check if oldfd is the same as newfd (not allowed in dup3, unlike dup2)
+    if oldfd == newfd {
+        kprint!("sys_dup3: oldfd == newfd (not allowed in dup3)");
+        return Err(Err::Inval);
+    }
+
+    // Check if oldfd is open
+    let old_fd_entry = get_fd(oldfd);
+    if old_fd_entry.fid == 0 {
+        kprint!("sys_dup3: oldfd {} is not open", oldfd);
+        return Err(Err::BadFd);
+    }
+
+    // Validate flags (O_CLOEXEC is the only valid flag for dup3)
+    const O_CLOEXEC: u32 = 0o2000000;
+    if (flags & !O_CLOEXEC) != 0 {
+        kprint!("sys_dup3: invalid flags 0x{:x}", flags);
+        return Err(Err::Inval);
+    }
+
+    // Allocate a temporary fid for the duplication
+    // We can't reuse the old fid if newfd was open, because clunking
+    // invalidates the fid in the 9P protocol
+    let temp_fid = find_free_fd()?;
+
+    // Duplicate the fid to the temporary fid (this only walks, doesn't open)
+    match dup_fid_to(old_fd_entry.fid, temp_fid) {
+        Ok(new_fid) => {
+            // In 9P, walking creates a new fid but doesn't open it
+            // We need to open the new fid to make it usable for I/O
+            // The mode field already contains the 9P flags (0=RDONLY, 1=WRONLY, 2=RDWR)
+            let tlopen = crate::p9::TlopenMessage::new(0, new_fid, old_fd_entry.mode);
+
+            match tlopen.send_tlopen() {
+                Ok(_) => match crate::p9::RlopenMessage::read_response() {
+                    crate::p9::P9Response::Success(_) => {
+                        kprint!("sys_dup3: opened new fid {} successfully", new_fid);
+                    }
+                    crate::p9::P9Response::Error(rlerror) => {
+                        kprint!("sys_dup3: failed to open new fid: ecode={}", rlerror.ecode);
+                        clunk(new_fid, false);
+                        return Err(Err::NoSys);
+                    }
+                },
+                Err(_) => {
+                    kprint!("sys_dup3: failed to send Tlopen");
+                    clunk(new_fid, false);
+                    return Err(Err::NoSys);
+                }
+            }
+
+            // Close newfd if it's currently open (after we've successfully duplicated and opened)
+            let new_fd_entry = get_fd(newfd);
+            if new_fd_entry.fid != 0 {
+                kprint!(
+                    "sys_dup3: closing existing fd {} (fid={})",
+                    newfd,
+                    new_fd_entry.fid
+                );
+                let _ = sys_close(newfd); // Ignore errors from close
+            }
+
+            // Copy all fields from the original descriptor
+            update_fd(
+                newfd,
+                FileDescriptor {
+                    fid: new_fid,
+                    cursor: old_fd_entry.cursor,
+                    is_dir: old_fd_entry.is_dir,
+                    mode: old_fd_entry.mode,
+                    flags: old_fd_entry.flags,
+                },
+            );
+            kprint!(
+                "sys_dup3: duplicated fd {} (fid={}) to fd {} (fid={})",
+                oldfd,
+                old_fd_entry.fid,
+                newfd,
+                new_fid
+            );
+            Ok(newfd)
+        }
+        Err(e) => {
+            kprint!("sys_dup3: dup_fid_to failed: {:?}", e.as_errno());
+            Err(e)
+        }
+    }
 }
 
 pub fn sys_faccessat(_dfd: u32, _filename: u32, _mode: u32) -> Result<u32, Err> {
