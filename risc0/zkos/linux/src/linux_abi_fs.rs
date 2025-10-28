@@ -1004,14 +1004,20 @@ pub fn sys_faccessat2(_dfd: u32, _filename: u32, _mode: u32, _flags: u32) -> Res
     // Handle AT_EMPTY_PATH - check access on the fd itself
     if (_flags & AT_EMPTY_PATH) != 0 && filename_str.is_empty() {
         kprint!("sys_faccessat2: AT_EMPTY_PATH set, checking fd {}", _dfd);
-        let fd_entry = get_fd(_dfd);
-        if fd_entry.file_desc_id != 0xFF {
-            // File descriptor is valid and open - access granted
-            Ok(0)
-        } else {
-            // Invalid file descriptor
-            Err(Err::Inval)
+
+        // Validate dfd is in range
+        if _dfd >= 256 {
+            return Err(Err::BadFd);
         }
+
+        let fd_entry = get_fd(_dfd);
+        if fd_entry.file_desc_id == 0xFF {
+            // Invalid file descriptor
+            return Err(Err::BadFd);
+        }
+
+        // File descriptor is valid and open - access granted
+        Ok(0)
     } else {
         // Normal path-based access check
         // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
@@ -2398,21 +2404,41 @@ const AT_FDCWD: i32 = -100; // -100i32 as u32
 fn get_starting_fid(_dfd: u32, filename_str: &str) -> Result<u32, Err> {
     // If the pathname given in pathname is relative, then it is interpreted relative to the directory referred to by the file descriptor dirfd (rather than relative to the current working directory of the calling process, as is done by open(2) for a relative pathname).
     // If pathname is relative and dirfd is the special value AT_FDCWD, then pathname is interpreted relative to the current working directory of the calling process (like open(2)).
-    let _dfd = _dfd as i32;
+    let _dfd_i32 = _dfd as i32;
     if filename_str.starts_with("/") {
+        // Absolute paths ignore dirfd - always use root
         Ok(get_root_fid())
-    } else if _dfd == AT_FDCWD {
+    } else if _dfd_i32 == AT_FDCWD {
         // AT_FDCWD case
         Ok(get_cwd_fid())
     } else {
-        if !(0..256).contains(&_dfd) {
-            return Err(Err::Inval);
+        // For relative paths, dirfd must be valid
+        // Check if dfd is in range (including negative values cast to u32)
+        if _dfd_i32 < 0 || _dfd >= 256 {
+            kprint!(
+                "get_starting_fid: invalid dfd={} (as i32={})",
+                _dfd,
+                _dfd_i32
+            );
+            return Err(Err::BadFd);
         }
-        let fd_entry = get_fd(_dfd as u32);
+
+        let fd_entry = get_fd(_dfd);
         if fd_entry.file_desc_id == 0xFF {
-            return Err(Err::NoSys);
+            kprint!("get_starting_fid: dfd={} is not open", _dfd);
+            return Err(Err::BadFd);
         }
+
+        // Check if dfd is a directory (required for relative paths)
         let file_desc = get_file_desc(fd_entry.file_desc_id);
+        if !file_desc.is_dir {
+            kprint!(
+                "get_starting_fid: dfd={} is not a directory (is_dir=false)",
+                _dfd
+            );
+            return Err(Err::NotDir);
+        }
+
         Ok(file_desc.fid)
     }
 }

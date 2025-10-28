@@ -437,6 +437,7 @@ pub enum Err {
     NoMem = -12,       // ENOMEM
     Fault = -14,       // EFAULT - Bad address
     FileExists = -17,  // EEXIST
+    NotDir = -20,      // ENOTDIR - Not a directory
     IsDir = -21,       // EISDIR - Is a directory
     Inval = -22,       // EINVAL
     MFile = -24,       // EMFILE - Too many open files
