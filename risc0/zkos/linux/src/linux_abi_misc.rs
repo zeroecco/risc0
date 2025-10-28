@@ -1358,17 +1358,6 @@ pub fn sys_statmount(_dfd: u32, _filename: u32, _buffer: u32, _bufsize: u32) -> 
     Err(Err::NoSys)
 }
 
-pub fn sys_symlinkat(
-    _target: u32,
-    _newdirfd: u32,
-    _linkpath: u32,
-    _flags: u32,
-) -> Result<u32, Err> {
-    let msg = b"sys_symlinkat not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
-}
-
 pub fn sys_sync() -> Result<u32, Err> {
     let msg = b"sys_sync not implemented";
     host_log(msg.as_ptr(), msg.len());
@@ -1505,17 +1494,6 @@ pub fn sys_unshare(_flags: u32) -> Result<u32, Err> {
 
 pub fn sys_userfaultfd(_flags: u32) -> Result<u32, Err> {
     let msg = b"sys_userfaultfd not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
-}
-
-pub fn sys_utimensat_time64(
-    _dfd: u32,
-    _filename: u32,
-    _times: u32,
-    _flags: u32,
-) -> Result<u32, Err> {
-    let msg = b"sys_utimensat_time64 not implemented";
     host_log(msg.as_ptr(), msg.len());
     Err(Err::NoSys)
 }

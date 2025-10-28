@@ -4065,6 +4065,24 @@ pub enum RsymlinkError {
     InternalError,
 }
 
+impl MessageError for RsymlinkError {
+    fn buffer_too_small() -> Self {
+        RsymlinkError::BufferTooSmall
+    }
+
+    fn invalid_message_type() -> Self {
+        RsymlinkError::InvalidMessageType
+    }
+}
+
+impl ReadableMessage for RsymlinkMessage {
+    type Error = RsymlinkError;
+
+    fn deserialize(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+        RsymlinkMessage::deserialize(buf)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TmknodError {
     BufferTooSmall,

@@ -9,10 +9,10 @@ use crate::{
         P9Response, P9SetattrMask, Qid, RattachMessage, RclunkMessage, ReadableMessage,
         RgetattrMessage, RlcreateMessage, RlopenMessage, RmkdirMessage, RmknodMessage,
         RreadMessage, RreaddirMessage, RreadlinkMessage, RremoveMessage, RsetattrMessage,
-        RversionMessage, RwalkMessage, RwriteMessage, TattachMessage, TlcreateMessage,
-        TlopenMessage, TmkdirMessage, TmknodMessage, TreadMessage, TreaddirMessage,
-        TreadlinkMessage, TremoveMessage, TsetattrMessage, TversionMessage, TwriteMessage,
-        constants::*,
+        RsymlinkMessage, RversionMessage, RwalkMessage, RwriteMessage, TattachMessage,
+        TlcreateMessage, TlopenMessage, TmkdirMessage, TmknodMessage, TreadMessage,
+        TreaddirMessage, TreadlinkMessage, TremoveMessage, TsetattrMessage, TsymlinkMessage,
+        TversionMessage, TwriteMessage, constants::*,
     },
 };
 
@@ -971,9 +971,44 @@ pub fn sys_faccessat2(_dfd: u32, _filename: u32, _mode: u32, _flags: u32) -> Res
         return Err(Err::NoSys);
     }
 
+    // Check for invalid address (NULL pointer or out of user memory range)
+    if _filename == 0 {
+        kprint!("sys_faccessat2: invalid filename address (NULL)");
+        return Err(Err::Fault);
+    }
+
+    // Check if address is in user memory range (below 0xC0000000)
+    if _filename >= 0xC0000000 {
+        kprint!(
+            "sys_faccessat2: invalid filename address (out of user memory): 0x{:x}",
+            _filename
+        );
+        return Err(Err::Fault);
+    }
+
+    // Validate flags - check for invalid flag values
     const AT_EACCESS: u32 = 0x200;
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_FLAGS_MASK: u32 = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    // Check for invalid flags
+    // -1 (0xFFFFFFFF when cast from i32) sets all bits, which is invalid
+    let flags_i32 = _flags as i32;
+    if flags_i32 < 0 || (_flags & !AT_FLAGS_MASK) != 0 {
+        kprint!("sys_faccessat2: invalid flags 0x{:x}", _flags);
+        return Err(Err::Inval);
+    }
+
+    // Validate mode - check for invalid mode values
+    // Valid modes: F_OK (0), R_OK (4), W_OK (2), X_OK (1), or combinations
+    // -1 (0xFFFFFFFF when cast from i32) is invalid
+    let mode_i32 = _mode as i32;
+    const MODE_MASK: u32 = 0x7; // Only lowest 3 bits valid
+    if mode_i32 < 0 || (_mode & !MODE_MASK) != 0 {
+        kprint!("sys_faccessat2: invalid mode 0x{:x}", _mode);
+        return Err(Err::Inval);
+    }
 
     // Parse filename
     let filename = unsafe { core::slice::from_raw_parts(_filename as *const u8, 256) };
@@ -1266,6 +1301,173 @@ pub fn sys_fchownat(dfd: u32, filename: u32, user: u32, group: u32, flag: u32) -
     }
 }
 
+pub fn sys_utimensat_time64(dfd: u32, filename: u32, times: u32, flags: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        let msg = b"sys_utimensat_time64: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Parse filename
+    let filename_buf = unsafe { core::slice::from_raw_parts(filename as *const u8, 256) };
+    let null_pos = filename_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(filename_buf.len());
+    let filename_slice = &filename_buf[..null_pos];
+    let filename_str = match str::from_utf8(filename_slice) {
+        Ok(s) => s,
+        Err(_) => {
+            kprint!("sys_utimensat_time64: invalid UTF-8 filename");
+            return Err(Err::NoSys);
+        }
+    };
+
+    kprint!(
+        "sys_utimensat_time64: dfd={}, filename='{}', times={}, flags={}",
+        dfd,
+        filename_str,
+        times,
+        flags
+    );
+
+    // Handle AT_EMPTY_PATH - update times on the fd itself
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    if (flags & AT_EMPTY_PATH) != 0 && filename_str.is_empty() {
+        // Update times on the file descriptor itself
+        if dfd >= 256 {
+            return Err(Err::BadFd);
+        }
+
+        let fd_entry = get_fd(dfd);
+        if fd_entry.file_desc_id == 0xFF {
+            return Err(Err::BadFd);
+        }
+
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        let fid = file_desc.fid;
+
+        // Parse times and update
+        let (atime_sec, atime_nsec, mtime_sec, mtime_nsec) = parse_times(times)?;
+
+        let valid = P9SetattrMask::Atime as u32 | P9SetattrMask::Mtime as u32;
+        let tsetattr = TsetattrMessage::new(
+            0,          // tag
+            fid,        // fid
+            valid,      // valid mask (Atime and Mtime)
+            0,          // mode (not changing)
+            0,          // uid (not changing)
+            0,          // gid (not changing)
+            0,          // size (not changing)
+            atime_sec,  // atime_sec
+            atime_nsec, // atime_nsec
+            mtime_sec,  // mtime_sec
+            mtime_nsec, // mtime_nsec
+        );
+
+        match tsetattr.send_tsetattr() {
+            Ok(_) => match RsetattrMessage::read_response() {
+                P9Response::Success(_) => Ok(0),
+                P9Response::Error(_) => Err(Err::NoSys),
+            },
+            Err(_) => Err(Err::NoSys),
+        }
+    } else {
+        // Normal path-based update
+        resolve_path(dfd, filename_str, 0xFFFF_FFFE)?;
+
+        // Parse times
+        let (atime_sec, atime_nsec, mtime_sec, mtime_nsec) = parse_times(times)?;
+
+        // Create Tsetattr message to update times
+        let valid = P9SetattrMask::Atime as u32 | P9SetattrMask::Mtime as u32;
+        let tsetattr = TsetattrMessage::new(
+            0,           // tag
+            0xFFFF_FFFE, // fid (the file we walked to)
+            valid,       // valid mask (Atime and Mtime)
+            0,           // mode (not changing)
+            0,           // uid (not changing)
+            0,           // gid (not changing)
+            0,           // size (not changing)
+            atime_sec,   // atime_sec
+            atime_nsec,  // atime_nsec
+            mtime_sec,   // mtime_sec
+            mtime_nsec,  // mtime_nsec
+        );
+
+        match tsetattr.send_tsetattr() {
+            Ok(_) => match RsetattrMessage::read_response() {
+                P9Response::Success(_) => {
+                    clunk(0xFFFF_FFFE, false);
+                    Ok(0)
+                }
+                P9Response::Error(rlerror) => {
+                    clunk(0xFFFF_FFFE, false);
+                    kprint!("sys_utimensat_time64: Rlerror: ecode={}", rlerror.ecode);
+                    Err(Err::NoSys)
+                }
+            },
+            Err(e) => {
+                clunk(0xFFFF_FFFE, false);
+                kprint!("sys_utimensat_time64: error: {:?}", e);
+                Err(Err::NoSys)
+            }
+        }
+    }
+}
+
+// Helper function to parse times array
+fn parse_times(times: u32) -> Result<(u64, u64, u64, u64), Err> {
+    const UTIME_OMIT: i64 = 0x3fffffff;
+    const UTIME_NOW: i64 = 0x3ffffffe;
+
+    if times == 0 {
+        // NULL times - update both to current time (0 means "now" in 9P)
+        return Ok((0, 0, 0, 0));
+    }
+
+    // Parse the timespec array: struct timespec64[2] = {atime, mtime}
+    // timespec64: {tv_sec: i64, tv_nsec: i64}
+    let timespec_array = unsafe { core::slice::from_raw_parts(times as *const i64, 4) };
+
+    let atime_sec_raw = timespec_array[0];
+    let atime_nsec_raw = timespec_array[1];
+
+    let mtime_sec_raw = timespec_array[2];
+    let mtime_nsec_raw = timespec_array[3];
+
+    // Handle UTIME_OMIT and UTIME_NOW
+    let atime_sec = if atime_sec_raw == UTIME_OMIT || atime_nsec_raw == UTIME_OMIT {
+        return Err(Err::NoSys); // UTIME_OMIT requires preserving current time
+    } else if atime_sec_raw == UTIME_NOW || atime_nsec_raw == UTIME_NOW {
+        0 // 0 means "now" in 9P
+    } else {
+        atime_sec_raw as u64
+    };
+
+    let atime_nsec = if atime_sec_raw == UTIME_NOW || atime_nsec_raw == UTIME_NOW {
+        0
+    } else {
+        (atime_nsec_raw as u64) & 0xFFFFFFFF // Keep only 32 bits for nsec
+    };
+
+    let mtime_sec = if mtime_sec_raw == UTIME_OMIT || mtime_nsec_raw == UTIME_OMIT {
+        return Err(Err::NoSys);
+    } else if mtime_sec_raw == UTIME_NOW || mtime_nsec_raw == UTIME_NOW {
+        0
+    } else {
+        mtime_sec_raw as u64
+    };
+
+    let mtime_nsec = if mtime_sec_raw == UTIME_NOW || mtime_nsec_raw == UTIME_NOW {
+        0
+    } else {
+        (mtime_nsec_raw as u64) & 0xFFFFFFFF
+    };
+
+    Ok((atime_sec, atime_nsec, mtime_sec, mtime_nsec))
+}
+
 pub fn sys_fdatasync(_fd: u32) -> Result<u32, Err> {
     let msg = b"sys_fdatasync not implemented";
     host_log(msg.as_ptr(), msg.len());
@@ -1446,6 +1648,96 @@ pub fn sys_linkat(
     let msg = b"sys_linkat not implemented";
     host_log(msg.as_ptr(), msg.len());
     Err(Err::NoSys)
+}
+
+pub fn sys_symlinkat(target: u32, newdirfd: u32, linkpath: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        let msg = b"sys_symlinkat: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Parse target (symlink contents) and linkpath (symlink name)
+    let target_buf = unsafe { core::slice::from_raw_parts(target as *const u8, 256) };
+    let target_null_pos = target_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(target_buf.len());
+    let target_str = match str::from_utf8(&target_buf[..target_null_pos]) {
+        Ok(s) => s,
+        Err(_) => {
+            kprint!("sys_symlinkat: invalid UTF-8 target");
+            return Err(Err::NoSys);
+        }
+    };
+
+    let linkpath_buf = unsafe { core::slice::from_raw_parts(linkpath as *const u8, 256) };
+    let linkpath_null_pos = linkpath_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(linkpath_buf.len());
+    let linkpath_str = match str::from_utf8(&linkpath_buf[..linkpath_null_pos]) {
+        Ok(s) => s,
+        Err(_) => {
+            kprint!("sys_symlinkat: invalid UTF-8 linkpath");
+            return Err(Err::NoSys);
+        }
+    };
+
+    kprint!(
+        "sys_symlinkat: target='{}', newdirfd={}, linkpath='{}'",
+        target_str,
+        newdirfd,
+        linkpath_str
+    );
+
+    // Split linkpath into directory and filename
+    let (dir_path, file_name) = split_path(linkpath_str);
+    kprint!(
+        "sys_symlinkat: dir_path='{}', file_name='{}'",
+        dir_path,
+        file_name
+    );
+
+    // Resolve the directory where the symlink will be created
+    resolve_path(newdirfd, &dir_path, 0xFFFF_FFFE)?;
+
+    // Create symlink using Tsymlink
+    let tsymlink = TsymlinkMessage::new(
+        0,                      // tag
+        0xFFFF_FFFE,            // fid (directory)
+        file_name.to_string(),  // name (symlink name)
+        target_str.to_string(), // symtgt (symlink target)
+        0,                      // gid (default)
+    );
+
+    match tsymlink.send_tsymlink() {
+        Ok(bytes_written) => {
+            kprint!("sys_symlinkat: sent {} bytes for Tsymlink", bytes_written);
+        }
+        Err(e) => {
+            kprint!("sys_symlinkat: error sending Tsymlink: {:?}", e);
+            clunk(0xFFFF_FFFE, false);
+            return Err(Err::NoSys);
+        }
+    }
+
+    match RsymlinkMessage::read_response() {
+        P9Response::Success(rsymlink) => {
+            kprint!("sys_symlinkat: rsymlink = {:?}", rsymlink);
+            clunk(0xFFFF_FFFE, false);
+            Ok(0)
+        }
+        P9Response::Error(rlerror) => {
+            kprint!(
+                "sys_symlinkat: received Rlerror: tag={}, ecode={}",
+                rlerror.tag,
+                rlerror.ecode
+            );
+            clunk(0xFFFF_FFFE, false);
+            Err(Err::NoSys)
+        }
+    }
 }
 
 pub fn sys_listxattr(_pathname: u32, _list: u32, _size: u32) -> Result<u32, Err> {
