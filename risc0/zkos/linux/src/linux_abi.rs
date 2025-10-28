@@ -706,7 +706,7 @@ pub fn handle_linux_syscall() -> ! {
         SYS_FACCESSAT => syscall3(sys_faccessat),
         SYS_FACCESSAT2 => syscall4(sys_faccessat2),
         SYS_FADVISE64_64 => syscall4(sys_fadvise64_64),
-        SYS_FALLOCATE => syscall4(sys_fallocate),
+        SYS_FALLOCATE => syscall6(sys_fallocate),
         SYS_FANOTIFY_INIT => syscall2(sys_fanotify_init),
         SYS_FANOTIFY_MARK => syscall5(sys_fanotify_mark),
         SYS_FCHDIR => syscall1(sys_fchdir),

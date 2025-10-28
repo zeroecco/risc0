@@ -1083,10 +1083,218 @@ pub fn sys_fadvise64_64(_fd: u32, _offset: u32, _len: u32, _advice: u32) -> Resu
     Err(Err::NoSys)
 }
 
-pub fn sys_fallocate(_fd: u32, _mode: u32, _offset: u32, _len: u32) -> Result<u32, Err> {
-    let msg = b"sys_fallocate not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_fallocate(
+    fd: u32,
+    mode: u32,
+    offset_low: u32,
+    offset_high: u32,
+    len_low: u32,
+    len_high: u32,
+) -> Result<u32, Err> {
+    // On 32-bit RISC-V, 64-bit arguments are passed in two registers (low, high)
+    let offset: u64 = ((offset_high as u64) << 32) | (offset_low as u64);
+    let len: u64 = ((len_high as u64) << 32) | (len_low as u64);
+    let end_pos = offset + len;
+
+    if !get_p9_enabled() {
+        let msg = b"sys_fallocate: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Validate mode flags
+    // FALLOC_FL_KEEP_SIZE = 0x01 (don't change file size, just preallocate space)
+    // FALLOC_FL_PUNCH_HOLE = 0x02 (punch a hole)
+    // FALLOC_FL_NO_HIDE_STALE = 0x04
+    const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
+
+    // For now, we only support the default mode (0) and FALLOC_FL_KEEP_SIZE
+    if (mode & !FALLOC_FL_KEEP_SIZE) != 0 {
+        kprint!("sys_fallocate: unsupported mode flags 0x{:x}", mode);
+        // Return success for unsupported flags (some filesystems don't support all flags)
+        // but we'll still try to allocate space
+    }
+
+    kprint!(
+        "sys_fallocate: fd={}, mode=0x{:x}, offset={}, len={}, end_pos={}",
+        fd,
+        mode,
+        offset,
+        len,
+        end_pos
+    );
+
+    // Get current file size - we always need it
+    let tgetattr = crate::p9::TgetattrMessage::new(0, file_desc.fid, P9_GETATTR_SIZE);
+    let current_size = match tgetattr.send_tgetattr() {
+        Ok(_) => match RgetattrMessage::read_response() {
+            P9Response::Success(rgetattr) => rgetattr.size,
+            P9Response::Error(_) => {
+                kprint!("sys_fallocate: error getting current file size");
+                return Err(Err::NoSys);
+            }
+        },
+        Err(_) => {
+            kprint!("sys_fallocate: error sending getattr");
+            return Err(Err::NoSys);
+        }
+    };
+
+    kprint!(
+        "sys_fallocate: current_size={}, end_pos={}, mode=0x{:x}",
+        current_size,
+        end_pos,
+        mode
+    );
+
+    // Handle allocation based on mode
+    if (mode & FALLOC_FL_KEEP_SIZE) != 0 {
+        // FALLOC_FL_KEEP_SIZE: Preallocate space but don't change file size
+        // Since 9P doesn't support sparse allocation, we need to temporarily extend
+        // the file to allocate space, then restore the original size
+        let size_to_allocate = end_pos.max(current_size);
+
+        if size_to_allocate > current_size {
+            // First, extend the file to allocate space
+            let valid = P9SetattrMask::Size as u32;
+            let tsetattr_extend = TsetattrMessage::new(
+                0,
+                file_desc.fid,
+                valid,
+                0,
+                0,
+                0,
+                size_to_allocate,
+                0,
+                0,
+                0,
+                0,
+            );
+
+            match tsetattr_extend.send_tsetattr() {
+                Ok(_) => match RsetattrMessage::read_response() {
+                    P9Response::Success(_) => {
+                        kprint!(
+                            "sys_fallocate: allocated space (extended to {}), now restoring size to {}",
+                            size_to_allocate,
+                            current_size
+                        );
+
+                        // Now restore the original size
+                        let tsetattr_restore = TsetattrMessage::new(
+                            0,
+                            file_desc.fid,
+                            valid,
+                            0,
+                            0,
+                            0,
+                            current_size,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
+
+                        match tsetattr_restore.send_tsetattr() {
+                            Ok(_) => match RsetattrMessage::read_response() {
+                                P9Response::Success(_) => {
+                                    kprint!("sys_fallocate: restored size to {}", current_size);
+                                    Ok(0)
+                                }
+                                P9Response::Error(e) => {
+                                    kprint!(
+                                        "sys_fallocate: error restoring size: ecode={}",
+                                        e.ecode
+                                    );
+                                    Err(Err::NoSys)
+                                }
+                            },
+                            Err(e) => {
+                                kprint!("sys_fallocate: error sending restore Tsetattr: {:?}", e);
+                                Err(Err::NoSys)
+                            }
+                        }
+                    }
+                    P9Response::Error(rlerror) => {
+                        kprint!(
+                            "sys_fallocate: error extending file: ecode={}",
+                            rlerror.ecode
+                        );
+                        Err(Err::NoSys)
+                    }
+                },
+                Err(e) => {
+                    kprint!("sys_fallocate: error sending extend Tsetattr: {:?}", e);
+                    Err(Err::NoSys)
+                }
+            }
+        } else {
+            // Already large enough, nothing to do
+            kprint!(
+                "sys_fallocate: file already large enough (size={})",
+                current_size
+            );
+            Ok(0)
+        }
+    } else {
+        // Default mode: extend file to end_pos (or keep current if larger)
+        // For fallocate, we should extend the file to at least offset + len
+        // even if the file is already larger
+        let target_size = end_pos.max(current_size);
+
+        kprint!(
+            "sys_fallocate: default mode - current_size={}, end_pos={}, target_size={}",
+            current_size,
+            end_pos,
+            target_size
+        );
+
+        if target_size > current_size {
+            let valid = P9SetattrMask::Size as u32;
+            let tsetattr =
+                TsetattrMessage::new(0, file_desc.fid, valid, 0, 0, 0, target_size, 0, 0, 0, 0);
+
+            match tsetattr.send_tsetattr() {
+                Ok(_) => match RsetattrMessage::read_response() {
+                    P9Response::Success(_) => {
+                        kprint!(
+                            "sys_fallocate: successfully extended file to {}",
+                            target_size
+                        );
+                        Ok(0)
+                    }
+                    P9Response::Error(rlerror) => {
+                        kprint!("sys_fallocate: error setting size: ecode={}", rlerror.ecode);
+                        Err(Err::NoSys)
+                    }
+                },
+                Err(e) => {
+                    kprint!("sys_fallocate: error sending Tsetattr: {:?}", e);
+                    Err(Err::NoSys)
+                }
+            }
+        } else {
+            // Already large enough, nothing to do
+            kprint!(
+                "sys_fallocate: file already large enough (size={} >= target={})",
+                current_size,
+                target_size
+            );
+            Ok(0)
+        }
+    }
 }
 
 pub fn sys_fanotify_init(_flags: u32, _event_f_flags: u32) -> Result<u32, Err> {
