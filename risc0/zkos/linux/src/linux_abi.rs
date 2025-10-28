@@ -441,6 +441,7 @@ pub enum Err {
     IsDir = -21,       // EISDIR - Is a directory
     Inval = -22,       // EINVAL
     MFile = -24,       // EMFILE - Too many open files
+    FileTooBig = -27,  // EFBIG - File too large
     NameTooLong = -36, // ENAMETOOLONG - File name too long
     NoSys = -38,       // ENOSYS - Function not implemented
 }

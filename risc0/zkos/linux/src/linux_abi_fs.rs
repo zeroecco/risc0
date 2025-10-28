@@ -1092,9 +1092,38 @@ pub fn sys_fallocate(
     len_high: u32,
 ) -> Result<u32, Err> {
     // On 32-bit RISC-V, 64-bit arguments are passed in two registers (low, high)
-    let offset: u64 = ((offset_high as u64) << 32) | (offset_low as u64);
-    let len: u64 = ((len_high as u64) << 32) | (len_low as u64);
+    // Check for negative values BEFORE converting to u64
+    // If the high word has the sign bit set (0x80000000), it's negative
+    let offset_i64 = ((offset_high as i32 as i64) << 32) | (offset_low as i64);
+    let len_i64 = ((len_high as i32 as i64) << 32) | (len_low as i64);
+
+    // Validate parameters before proceeding
+    if offset_i64 < 0 {
+        kprint!(
+            "sys_fallocate: negative offset {}, returning EINVAL",
+            offset_i64
+        );
+        return Err(Err::Inval);
+    }
+
+    if len_i64 <= 0 {
+        kprint!(
+            "sys_fallocate: invalid len {} (must be > 0), returning EINVAL",
+            len_i64
+        );
+        return Err(Err::Inval);
+    }
+
+    // Now convert to u64 for calculations
+    let offset: u64 = offset_i64 as u64;
+    let len: u64 = len_i64 as u64;
     let end_pos = offset + len;
+
+    // Check for overflow
+    if end_pos < offset || end_pos < len {
+        kprint!("sys_fallocate: overflow in offset+len calculation");
+        return Err(Err::Inval);
+    }
 
     if !get_p9_enabled() {
         let msg = b"sys_fallocate: p9 is not enabled";
@@ -1113,6 +1142,43 @@ pub fn sys_fallocate(
     }
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Check if file descriptor is opened for writing
+    // fallocate() requires a file descriptor opened for writing
+    const O_RDONLY: u32 = 0;
+    const O_WRONLY: u32 = 1;
+    const O_RDWR: u32 = 2;
+    const O_ACCMODE: u32 = O_RDONLY | O_WRONLY | O_RDWR;
+
+    let accmode = file_desc.flags & O_ACCMODE;
+    if accmode == O_RDONLY {
+        kprint!("sys_fallocate: fd opened read-only, returning EBADF");
+        return Err(Err::BadFd);
+    }
+
+    // Validate parameters
+    // Check for negative offset or len (cast to signed for comparison)
+    let offset_i64 = offset as i64;
+    let len_i64 = len as i64;
+
+    if offset_i64 < 0 {
+        kprint!(
+            "sys_fallocate: negative offset {}, returning EINVAL",
+            offset
+        );
+        return Err(Err::Inval);
+    }
+
+    if len_i64 <= 0 {
+        kprint!("sys_fallocate: invalid len {}, returning EINVAL", len);
+        return Err(Err::Inval);
+    }
+
+    // Check for overflow
+    if end_pos < offset || end_pos < len {
+        kprint!("sys_fallocate: overflow in offset+len calculation");
+        return Err(Err::Inval);
+    }
 
     // Validate mode flags
     // FALLOC_FL_KEEP_SIZE = 0x01 (don't change file size, just preallocate space)
@@ -1165,6 +1231,17 @@ pub fn sys_fallocate(
         // Since 9P doesn't support sparse allocation, we need to temporarily extend
         // the file to allocate space, then restore the original size
         let size_to_allocate = end_pos.max(current_size);
+
+        // Check if the requested size is too large before attempting allocation
+        const MAX_REASONABLE_SIZE: u64 = 0x7FFF_FFFF_FFFF_FFFF; // 2^63 - 1
+        if size_to_allocate > MAX_REASONABLE_SIZE || offset > MAX_REASONABLE_SIZE {
+            kprint!(
+                "sys_fallocate: file size too large: size_to_allocate={}, offset={}",
+                size_to_allocate,
+                offset
+            );
+            return Err(Err::FileTooBig);
+        }
 
         if size_to_allocate > current_size {
             // First, extend the file to allocate space
@@ -1229,10 +1306,22 @@ pub fn sys_fallocate(
                     }
                     P9Response::Error(rlerror) => {
                         kprint!(
-                            "sys_fallocate: error extending file: ecode={}",
-                            rlerror.ecode
+                            "sys_fallocate: error extending file: ecode={}, size_to_allocate={}",
+                            rlerror.ecode,
+                            size_to_allocate
                         );
-                        Err(Err::NoSys)
+                        // Map 9P error codes to Linux error codes
+                        if rlerror.ecode == 27 {
+                            Err(Err::FileTooBig)
+                        } else if rlerror.ecode == 22
+                            && (size_to_allocate > 0x7FFF_FFFF_FFFF_FFFF
+                                || offset > 0x7FFF_FFFF_FFFF_FFFF)
+                        {
+                            // If the file size or offset is very large, treat EINVAL as EFBIG
+                            Err(Err::FileTooBig)
+                        } else {
+                            Err(Err::Inval)
+                        }
                     }
                 },
                 Err(e) => {
@@ -1277,7 +1366,24 @@ pub fn sys_fallocate(
                     }
                     P9Response::Error(rlerror) => {
                         kprint!("sys_fallocate: error setting size: ecode={}", rlerror.ecode);
-                        Err(Err::NoSys)
+                        // Map 9P error codes to Linux error codes
+                        // 27 = EFBIG (File too large)
+                        // 22 = EINVAL (Invalid argument)
+                        // For fallocate, if we're trying to allocate a very large file,
+                        // the server might return EINVAL, but we should check if it's actually EFBIG
+                        // MAX_FILESIZE is typically LLONG_MAX / 1024, and with 1024-byte blocks
+                        // the offset would be around 9 exabytes, which is > 0x7FFF_FFFF_FFFF_FFFF
+                        const MAX_REASONABLE_SIZE: u64 = 0x7FFF_FFFF_FFFF_FFFF; // 2^63 - 1
+                        if rlerror.ecode == 27 {
+                            Err(Err::FileTooBig)
+                        } else if rlerror.ecode == 22
+                            && (target_size > MAX_REASONABLE_SIZE || offset > MAX_REASONABLE_SIZE)
+                        {
+                            // If the file size or offset is very large, treat EINVAL as EFBIG
+                            Err(Err::FileTooBig)
+                        } else {
+                            Err(Err::Inval)
+                        }
                     }
                 },
                 Err(e) => {
