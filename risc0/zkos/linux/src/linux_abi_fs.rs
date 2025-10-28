@@ -100,6 +100,7 @@ pub struct FileDescription {
 #[derive(Copy, Clone)]
 pub struct FileDescriptor {
     pub file_desc_id: u32, // Index into FILE_DESC_TABLE, 0xFF means unused
+    pub cloexec: bool,     // FD_CLOEXEC flag (close-on-exec)
 }
 
 // File description table (similar to Linux's file table)
@@ -115,6 +116,7 @@ pub static mut FILE_DESC_TABLE: [FileDescription; 256] = [FileDescription {
 // File descriptor table (maps fd -> file_desc_id)
 pub static mut FD_TABLE: [FileDescriptor; 256] = [FileDescriptor {
     file_desc_id: 0xFF, // 0xFF means unused
+    cloexec: false,
 }; 256];
 
 pub fn get_fd(fd: u32) -> FileDescriptor {
@@ -407,7 +409,13 @@ pub fn sys_close(_fd: u32) -> Result<u32, Err> {
     }
 
     // Clear the file descriptor entry
-    update_fd(_fd, FileDescriptor { file_desc_id: 0xFF });
+    update_fd(
+        _fd,
+        FileDescriptor {
+            file_desc_id: 0xFF,
+            cloexec: false,
+        },
+    );
 
     Ok(0)
 }
@@ -840,10 +848,12 @@ pub fn sys_dup(fd: u32) -> Result<u32, Err> {
     let new_fd = find_free_fd()?;
 
     // Make the new fd point to the same file description
+    // sys_dup copies the FD_CLOEXEC flag from the original fd
     update_fd(
         new_fd,
         FileDescriptor {
             file_desc_id: fd_entry.file_desc_id,
+            cloexec: fd_entry.cloexec,
         },
     );
 
@@ -876,6 +886,14 @@ pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
         flags
     );
 
+    // Validate flags FIRST (O_CLOEXEC is the only valid flag for dup3)
+    // Invalid flags should return EINVAL even if fds are invalid
+    const O_CLOEXEC: u32 = 0o2000000;
+    if (flags & !O_CLOEXEC) != 0 {
+        kprint!("sys_dup3: invalid flags 0x{:x}", flags);
+        return Err(Err::Inval);
+    }
+
     // Validate file descriptors are in range
     if oldfd >= 256 {
         kprint!("sys_dup3: oldfd {} is out of range", oldfd);
@@ -899,13 +917,6 @@ pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
         return Err(Err::BadFd);
     }
 
-    // Validate flags (O_CLOEXEC is the only valid flag for dup3)
-    const O_CLOEXEC: u32 = 0o2000000;
-    if (flags & !O_CLOEXEC) != 0 {
-        kprint!("sys_dup3: invalid flags 0x{:x}", flags);
-        return Err(Err::Inval);
-    }
-
     // Close newfd if it's currently open
     let new_fd_entry = get_fd(newfd);
     if new_fd_entry.file_desc_id != 0xFF {
@@ -918,10 +929,13 @@ pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
     }
 
     // Make newfd point to the same file description as oldfd
+    // Set FD_CLOEXEC based on O_CLOEXEC flag
+    let cloexec_set = (flags & O_CLOEXEC) != 0;
     update_fd(
         newfd,
         FileDescriptor {
             file_desc_id: old_fd_entry.file_desc_id,
+            cloexec: cloexec_set,
         },
     );
 
@@ -1962,18 +1976,27 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
 
     kprint!("sys_fcntl64: _fd={} _cmd={} _arg={}", _fd, _cmd, _arg);
 
+    let fd_entry = get_fd(_fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
     if _cmd == F_GETFD {
         // Get file descriptor flags (only FD_CLOEXEC is relevant)
-        // In our implementation, we don't currently track FD_CLOEXEC per-fd
-        // For now, return 0 (FD_CLOEXEC not set)
-        kprint!("sys_fcntl64: F_GETFD returning 0 (FD_CLOEXEC not set)");
-        return Ok(0);
+        let flags = if fd_entry.cloexec { FD_CLOEXEC } else { 0 };
+        kprint!(
+            "sys_fcntl64: F_GETFD returning {} (cloexec={})",
+            flags,
+            fd_entry.cloexec
+        );
+        return Ok(flags);
     } else if _cmd == F_SETFD {
         // Set file descriptor flags
-        if _arg & FD_CLOEXEC == FD_CLOEXEC {
-            kprint!("sys_fcntl64: F_SETFD setting FD_CLOEXEC");
-        }
-        // We don't actually track FD_CLOEXEC, just return success
+        let new_cloexec = (_arg & FD_CLOEXEC) != 0;
+        let mut updated_entry = fd_entry;
+        updated_entry.cloexec = new_cloexec;
+        update_fd(_fd, updated_entry);
+        kprint!("sys_fcntl64: F_SETFD setting FD_CLOEXEC to {}", new_cloexec);
         return Ok(0);
     } else if _cmd == F_DUPFD_CLOEXEC {
         let fd_entry = get_fd(_fd);
@@ -1988,6 +2011,7 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
             new_fd,
             FileDescriptor {
                 file_desc_id: fd_entry.file_desc_id,
+                cloexec: true, // F_DUPFD_CLOEXEC sets FD_CLOEXEC
             },
         );
         inc_refcount(fd_entry.file_desc_id);
@@ -2896,6 +2920,7 @@ pub fn set_fd(fd: u32, fid: u32) {
         fd,
         FileDescriptor {
             file_desc_id: desc_id,
+            cloexec: false, // New file descriptors start with FD_CLOEXEC unset
         },
     );
 }
