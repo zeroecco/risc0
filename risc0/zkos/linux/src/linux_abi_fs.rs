@@ -85,22 +85,36 @@ pub fn get_cwd_str() -> String {
     }
 }
 
+// File description (like Linux's struct file) - shared state for duplicated fds
 #[derive(Copy, Clone)]
-pub struct FileDescriptor {
+pub struct FileDescription {
     pub fid: u32,
-    pub cursor: u64,
-    #[allow(dead_code)]
+    pub cursor: u64, // Shared cursor for all fds pointing to this description
     pub is_dir: bool,
     pub mode: u32,
-    pub flags: u32, // Linux open flags (O_APPEND, etc.)
+    pub flags: u32,    // Linux open flags (O_APPEND, etc.)
+    pub refcount: u32, // Number of file descriptors pointing to this description
 }
 
-pub static mut FD_TABLE: [FileDescriptor; 256] = [FileDescriptor {
+// File descriptor table - each fd points to a file description
+#[derive(Copy, Clone)]
+pub struct FileDescriptor {
+    pub file_desc_id: u32, // Index into FILE_DESC_TABLE, 0xFF means unused
+}
+
+// File description table (similar to Linux's file table)
+pub static mut FILE_DESC_TABLE: [FileDescription; 256] = [FileDescription {
     fid: 0,
     cursor: 0,
     is_dir: false,
     mode: 0xFFFF_FFFF,
     flags: 0,
+    refcount: 0,
+}; 256];
+
+// File descriptor table (maps fd -> file_desc_id)
+pub static mut FD_TABLE: [FileDescriptor; 256] = [FileDescriptor {
+    file_desc_id: 0xFF, // 0xFF means unused
 }; 256];
 
 pub fn get_fd(fd: u32) -> FileDescriptor {
@@ -111,6 +125,71 @@ pub fn update_fd(fd: u32, file_descriptor: FileDescriptor) {
     unsafe {
         FD_TABLE[fd as usize] = file_descriptor;
     }
+}
+
+// Get file description by ID
+pub fn get_file_desc(desc_id: u32) -> FileDescription {
+    unsafe { FILE_DESC_TABLE[desc_id as usize] }
+}
+
+// Update file description
+pub fn update_file_desc(desc_id: u32, desc: FileDescription) {
+    unsafe {
+        FILE_DESC_TABLE[desc_id as usize] = desc;
+    }
+}
+
+// Helper to get file description from file descriptor
+#[allow(dead_code)]
+pub fn get_file_desc_from_fd(fd: u32) -> Option<FileDescription> {
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        None
+    } else {
+        Some(get_file_desc(fd_entry.file_desc_id))
+    }
+}
+
+// Helper to update file description through file descriptor
+#[allow(dead_code)]
+pub fn update_file_desc_through_fd(fd: u32, desc: FileDescription) -> Result<(), Err> {
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+    update_file_desc(fd_entry.file_desc_id, desc);
+    Ok(())
+}
+
+// Find a free file description slot
+pub fn find_free_file_desc() -> Result<u32, Err> {
+    for i in 0..256 {
+        let desc = get_file_desc(i);
+        if desc.fid == 0 && desc.refcount == 0 {
+            return Ok(i);
+        }
+    }
+    kprint!("find_free_file_desc: no free file descriptions available");
+    Err(Err::MFile)
+}
+
+// Increment reference count for a file description
+pub fn inc_refcount(desc_id: u32) {
+    let mut desc = get_file_desc(desc_id);
+    desc.refcount += 1;
+    update_file_desc(desc_id, desc);
+}
+
+// Decrement reference count for a file description
+// Returns true if this was the last reference (should clunk)
+pub fn dec_refcount(desc_id: u32) -> bool {
+    let mut desc = get_file_desc(desc_id);
+    if desc.refcount > 0 {
+        desc.refcount -= 1;
+    }
+    let should_clunk = desc.refcount == 0;
+    update_file_desc(desc_id, desc);
+    should_clunk
 }
 
 // Linux dirent64 structure
@@ -299,22 +378,38 @@ pub fn sys_close(_fd: u32) -> Result<u32, Err> {
         return Err(Err::BadFd);
     }
     let fd_entry = get_fd(_fd);
-    if fd_entry.fid != 0xFFFF_FFFE && fd_entry.fid != 0 {
-        clunk(fd_entry.fid, false);
-        update_fd(
-            _fd,
-            FileDescriptor {
+    if fd_entry.file_desc_id == 0xFF {
+        // File descriptor is not open
+        return Err(Err::BadFd);
+    }
+
+    let desc_id = fd_entry.file_desc_id;
+    let file_desc = get_file_desc(desc_id);
+
+    // Decrement reference count
+    let should_clunk = dec_refcount(desc_id);
+
+    // Only clunk the fid when this is the last reference
+    if should_clunk && file_desc.fid != 0xFFFF_FFFE && file_desc.fid != 0 {
+        clunk(file_desc.fid, false);
+        // Clear the file description
+        update_file_desc(
+            desc_id,
+            FileDescription {
                 fid: 0,
                 cursor: 0,
                 is_dir: false,
                 mode: 0xFFFF_FFFF,
                 flags: 0,
+                refcount: 0,
             },
         );
-        Ok(0)
-    } else {
-        Err(Err::BadFd)
     }
+
+    // Clear the file descriptor entry
+    update_fd(_fd, FileDescriptor { file_desc_id: 0xFF });
+
+    Ok(0)
 }
 
 pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> Result<u32, Err> {
@@ -322,13 +417,18 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
         return Err(Err::Inval);
     }
     let fd_entry = get_fd(fd);
-    if fd_entry.fid != 0 {
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+    if file_desc.fid != 0 {
         let mut cursor = offset;
         let mut total_bytes_read = 0u32;
         while cursor < offset + (count as u64) {
             // read max 128 bytes at a time
             let max_count = (offset + count as u64 - cursor).min(128) as u32;
-            let tread = TreadMessage::new(0, fd_entry.fid, cursor, max_count);
+            let tread = TreadMessage::new(0, file_desc.fid, cursor, max_count);
             match tread.send_tread() {
                 Ok(_bytes_written) => {
                     // Success
@@ -393,20 +493,22 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
     let fd_entry = get_fd(_fd);
 
     // Check if fd is closed/invalid
-    if fd_entry.fid == 0 {
+    if fd_entry.file_desc_id == 0xFF {
         kprint!("sys_read: fd={} is not open", _fd);
         return Err(Err::BadFd);
     }
 
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
     // Check if fd is a directory
-    if fd_entry.is_dir {
+    if file_desc.is_dir {
         kprint!("sys_read: fd={} is a directory", _fd);
         return Err(Err::IsDir);
     }
 
-    if fd_entry.fid != 0 {
-        // read with Tread and Rread from the fid using 9p protocol and update .cursor in FD_TABLE
-        let tread = TreadMessage::new(0, fd_entry.fid, fd_entry.cursor, _count);
+    if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
+        // read with Tread and Rread from the fid using 9p protocol and update .cursor in FILE_DESC_TABLE
+        let tread = TreadMessage::new(0, file_desc.fid, file_desc.cursor, _count);
         match tread.send_tread() {
             Ok(_bytes_written) => {
                 // Success
@@ -442,9 +544,10 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
                     );
                     return Err(Err::NoSys);
                 }
-                let mut updated_entry = fd_entry;
-                updated_entry.cursor += rread.count as u64;
-                update_fd(_fd, updated_entry);
+                // Update the shared cursor in the file description
+                let mut updated_desc = file_desc;
+                updated_desc.cursor += rread.count as u64;
+                update_file_desc(fd_entry.file_desc_id, updated_desc);
                 return Ok(rread.count);
             }
             P9Response::Error(_rlerror) => {
@@ -462,7 +565,15 @@ pub fn sys_write(fd: u32, buf: u32, count: u32) -> Result<u32, Err> {
 }
 
 pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
-    // Check for NULL buffer
+    // Special case: NULL buffer with count=0 is allowed (Linux behavior)
+    // This allows write(fd, NULL, 0) to succeed and return 0
+    // Note: On Linux, write(fd, NULL, -1) (which becomes count=0xFFFFFFFF after cast)
+    // will also be treated as 0 if count would overflow, but we handle count=0 explicitly
+    if buf.is_null() && count == 0 {
+        return Ok(0);
+    }
+
+    // NULL buffer with count > 0 is invalid (causes EFAULT)
     if buf.is_null() {
         return Err(Err::Fault);
     }
@@ -478,15 +589,22 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
             host_log(msg.as_ptr(), msg.len());
             return Err(Err::NoSys);
         }
-        let mut fd_entry = get_fd(fd as u32);
-        if fd_entry.fid != 0 {
+        let fd_entry = get_fd(fd as u32);
+        if fd_entry.file_desc_id == 0xFF {
+            let msg = b"do_write: fd is not open";
+            host_log(msg.as_ptr(), msg.len());
+            return Err(Err::BadFd);
+        }
+
+        let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+        if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
             // Handle O_APPEND: position at end of file before each write
             const O_APPEND: u32 = 0o2000;
-            let mut current_cursor = fd_entry.cursor;
+            let mut current_cursor = file_desc.cursor;
 
-            if (fd_entry.flags & O_APPEND) == O_APPEND {
+            if (file_desc.flags & O_APPEND) == O_APPEND {
                 // Get file size using getattr
-                let tgetattr = crate::p9::TgetattrMessage::new(0, fd_entry.fid, P9_GETATTR_SIZE);
+                let tgetattr = crate::p9::TgetattrMessage::new(0, file_desc.fid, P9_GETATTR_SIZE);
                 match tgetattr.send_tgetattr() {
                     Ok(_) => match RgetattrMessage::read_response() {
                         P9Response::Success(rgetattr) => {
@@ -525,7 +643,7 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
                 );
 
                 let twrite =
-                    TwriteMessage::new(0, fd_entry.fid, current_cursor, chunk_data.to_vec());
+                    TwriteMessage::new(0, file_desc.fid, current_cursor, chunk_data.to_vec());
 
                 match twrite.send_twrite() {
                     Ok(_bytes_written) => {
@@ -561,9 +679,9 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
                 }
             }
 
-            // Update the file descriptor with the new cursor position
-            fd_entry.cursor = current_cursor;
-            update_fd(fd as u32, fd_entry);
+            // Update the shared cursor in the file description
+            file_desc.cursor = current_cursor;
+            update_file_desc(fd_entry.file_desc_id, file_desc);
 
             return Ok(total_written);
         }
@@ -711,62 +829,37 @@ pub fn sys_dup(fd: u32) -> Result<u32, Err> {
     }
     // diod/p9 protocol "fid can be cloned to newfid by calling walk with nwname set to zero."
     let fd_entry = get_fd(fd);
-    if fd_entry.fid == 0 {
+    if fd_entry.file_desc_id == 0xFF {
         kprint!("sys_dup: fd {} is not open", fd);
         return Err(Err::BadFd);
     }
-    let fid = fd_entry.fid;
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Allocate a new file descriptor (not a new file description!)
     let new_fd = find_free_fd()?;
-    match dup_fid_to(fid, new_fd) {
-        Ok(new_fid) => {
-            // In 9P, walking creates a new fid but doesn't open it
-            // We need to open the new fid to make it usable for I/O
-            // The mode field already contains the 9P flags (0=RDONLY, 1=WRONLY, 2=RDWR)
-            let tlopen = crate::p9::TlopenMessage::new(0, new_fid, fd_entry.mode);
 
-            match tlopen.send_tlopen() {
-                Ok(_) => match crate::p9::RlopenMessage::read_response() {
-                    crate::p9::P9Response::Success(_) => {
-                        kprint!("sys_dup: opened new fid {} successfully", new_fid);
-                    }
-                    crate::p9::P9Response::Error(rlerror) => {
-                        kprint!("sys_dup: failed to open new fid: ecode={}", rlerror.ecode);
-                        clunk(new_fid, false);
-                        return Err(Err::NoSys);
-                    }
-                },
-                Err(_) => {
-                    kprint!("sys_dup: failed to send Tlopen");
-                    clunk(new_fid, false);
-                    return Err(Err::NoSys);
-                }
-            }
+    // Make the new fd point to the same file description
+    update_fd(
+        new_fd,
+        FileDescriptor {
+            file_desc_id: fd_entry.file_desc_id,
+        },
+    );
 
-            // Copy all fields from the original descriptor
-            update_fd(
-                new_fd,
-                FileDescriptor {
-                    fid: new_fid,
-                    cursor: fd_entry.cursor,
-                    is_dir: fd_entry.is_dir,
-                    mode: fd_entry.mode,
-                    flags: fd_entry.flags,
-                },
-            );
-            kprint!(
-                "sys_dup: duplicated fd {} (fid={}) to fd {} (fid={})",
-                fd,
-                fid,
-                new_fd,
-                new_fid
-            );
-            Ok(new_fd)
-        }
-        Err(e) => {
-            kprint!("sys_dup: dup_fid_to failed: {:?}", e.as_errno());
-            Err(e)
-        }
-    }
+    // Increment the reference count for the shared file description
+    inc_refcount(fd_entry.file_desc_id);
+
+    kprint!(
+        "sys_dup: duplicated fd {} to fd {}, both pointing to desc_id {} (fid={}, refcount now {})",
+        fd,
+        new_fd,
+        fd_entry.file_desc_id,
+        file_desc.fid,
+        get_file_desc(fd_entry.file_desc_id).refcount
+    );
+
+    Ok(new_fd)
 }
 
 pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
@@ -801,7 +894,7 @@ pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
 
     // Check if oldfd is open
     let old_fd_entry = get_fd(oldfd);
-    if old_fd_entry.fid == 0 {
+    if old_fd_entry.file_desc_id == 0xFF {
         kprint!("sys_dup3: oldfd {} is not open", oldfd);
         return Err(Err::BadFd);
     }
@@ -813,73 +906,39 @@ pub fn sys_dup3(oldfd: u32, newfd: u32, flags: u32) -> Result<u32, Err> {
         return Err(Err::Inval);
     }
 
-    // Allocate a temporary fid for the duplication
-    // We can't reuse the old fid if newfd was open, because clunking
-    // invalidates the fid in the 9P protocol
-    let temp_fid = find_free_fd()?;
-
-    // Duplicate the fid to the temporary fid (this only walks, doesn't open)
-    match dup_fid_to(old_fd_entry.fid, temp_fid) {
-        Ok(new_fid) => {
-            // In 9P, walking creates a new fid but doesn't open it
-            // We need to open the new fid to make it usable for I/O
-            // The mode field already contains the 9P flags (0=RDONLY, 1=WRONLY, 2=RDWR)
-            let tlopen = crate::p9::TlopenMessage::new(0, new_fid, old_fd_entry.mode);
-
-            match tlopen.send_tlopen() {
-                Ok(_) => match crate::p9::RlopenMessage::read_response() {
-                    crate::p9::P9Response::Success(_) => {
-                        kprint!("sys_dup3: opened new fid {} successfully", new_fid);
-                    }
-                    crate::p9::P9Response::Error(rlerror) => {
-                        kprint!("sys_dup3: failed to open new fid: ecode={}", rlerror.ecode);
-                        clunk(new_fid, false);
-                        return Err(Err::NoSys);
-                    }
-                },
-                Err(_) => {
-                    kprint!("sys_dup3: failed to send Tlopen");
-                    clunk(new_fid, false);
-                    return Err(Err::NoSys);
-                }
-            }
-
-            // Close newfd if it's currently open (after we've successfully duplicated and opened)
-            let new_fd_entry = get_fd(newfd);
-            if new_fd_entry.fid != 0 {
-                kprint!(
-                    "sys_dup3: closing existing fd {} (fid={})",
-                    newfd,
-                    new_fd_entry.fid
-                );
-                let _ = sys_close(newfd); // Ignore errors from close
-            }
-
-            // Copy all fields from the original descriptor
-            update_fd(
-                newfd,
-                FileDescriptor {
-                    fid: new_fid,
-                    cursor: old_fd_entry.cursor,
-                    is_dir: old_fd_entry.is_dir,
-                    mode: old_fd_entry.mode,
-                    flags: old_fd_entry.flags,
-                },
-            );
-            kprint!(
-                "sys_dup3: duplicated fd {} (fid={}) to fd {} (fid={})",
-                oldfd,
-                old_fd_entry.fid,
-                newfd,
-                new_fid
-            );
-            Ok(newfd)
-        }
-        Err(e) => {
-            kprint!("sys_dup3: dup_fid_to failed: {:?}", e.as_errno());
-            Err(e)
-        }
+    // Close newfd if it's currently open
+    let new_fd_entry = get_fd(newfd);
+    if new_fd_entry.file_desc_id != 0xFF {
+        kprint!(
+            "sys_dup3: closing existing fd {} (desc_id={})",
+            newfd,
+            new_fd_entry.file_desc_id
+        );
+        let _ = sys_close(newfd); // Ignore errors from close
     }
+
+    // Make newfd point to the same file description as oldfd
+    update_fd(
+        newfd,
+        FileDescriptor {
+            file_desc_id: old_fd_entry.file_desc_id,
+        },
+    );
+
+    // Increment the reference count for the shared file description
+    inc_refcount(old_fd_entry.file_desc_id);
+
+    let file_desc = get_file_desc(old_fd_entry.file_desc_id);
+    kprint!(
+        "sys_dup3: duplicated fd {} to fd {}, both pointing to desc_id {} (fid={}, refcount now {})",
+        oldfd,
+        newfd,
+        old_fd_entry.file_desc_id,
+        file_desc.fid,
+        get_file_desc(old_fd_entry.file_desc_id).refcount
+    );
+
+    Ok(newfd)
 }
 
 pub fn sys_faccessat(_dfd: u32, _filename: u32, _mode: u32) -> Result<u32, Err> {
@@ -932,7 +991,7 @@ pub fn sys_faccessat2(_dfd: u32, _filename: u32, _mode: u32, _flags: u32) -> Res
     if (_flags & AT_EMPTY_PATH) != 0 && filename_str.is_empty() {
         kprint!("sys_faccessat2: AT_EMPTY_PATH set, checking fd {}", _dfd);
         let fd_entry = get_fd(_dfd);
-        if fd_entry.fid != 0 {
+        if fd_entry.file_desc_id != 0xFF {
             // File descriptor is valid and open - access granted
             Ok(0)
         } else {
@@ -1003,8 +1062,9 @@ pub fn sys_fchdir(fd: u32) -> Result<u32, Err> {
         return Err(Err::Inval);
     }
     let fd_entry = get_fd(fd);
-    if fd_entry.fid != 0 {
-        set_cwd_fid(fd_entry.fid);
+    if fd_entry.file_desc_id != 0xFF {
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        set_cwd_fid(file_desc.fid);
         Ok(0)
     } else {
         Err(Err::NoSys)
@@ -1244,10 +1304,12 @@ pub fn sys_ftruncate64(fd: u32, length: u32) -> Result<u32, Err> {
 
     // Get the file descriptor entry
     let fd_entry = get_fd(fd);
-    if fd_entry.fid == 0 {
+    if fd_entry.file_desc_id == 0xFF {
         kprint!("sys_ftruncate64: invalid file descriptor {}", fd);
-        return Err(Err::Inval);
+        return Err(Err::BadFd);
     }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
 
     // Create Tsetattr message for truncate operation
     // We only want to set the size, so we use the Size valid flag
@@ -1257,17 +1319,17 @@ pub fn sys_ftruncate64(fd: u32, length: u32) -> Result<u32, Err> {
     // For ftruncate, we don't want to change other attributes, so we use default values
     // and only set the size
     let tsetattr = TsetattrMessage::new(
-        0,            // tag
-        fd_entry.fid, // fid (the file we want to truncate)
-        valid,        // valid mask (only Size)
-        0,            // mode (not changing)
-        0,            // uid (not changing)
-        0,            // gid (not changing)
-        new_size,     // size (the new file size)
-        0,            // atime_sec (not changing)
-        0,            // atime_nsec (not changing)
-        0,            // mtime_sec (not changing)
-        0,            // mtime_nsec (not changing)
+        0,             // tag
+        file_desc.fid, // fid (the file we want to truncate)
+        valid,         // valid mask (only Size)
+        0,             // mode (not changing)
+        0,             // uid (not changing)
+        0,             // gid (not changing)
+        new_size,      // size (the new file size)
+        0,             // atime_sec (not changing)
+        0,             // atime_nsec (not changing)
+        0,             // mtime_sec (not changing)
+        0,             // mtime_nsec (not changing)
     );
 
     match tsetattr.send_tsetattr() {
@@ -1412,12 +1474,36 @@ pub fn sys_llseek(
     }
 
     let fd_entry = get_fd(_fd);
-    let mut updated_entry = fd_entry;
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
     let offset = ((_offset_high as u64) << 32) | (_offset_low as u64);
     let new_cursor = match whence {
         SEEK_SET => offset,
-        SEEK_CUR => fd_entry.cursor + offset,
-        SEEK_END => fd_entry.cursor + offset, // TODO: should add to file size, not cursor
+        SEEK_CUR => file_desc.cursor + offset,
+        SEEK_END => {
+            // For SEEK_END, we need to get the file size
+            if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
+                let tgetattr = crate::p9::TgetattrMessage::new(0, file_desc.fid, P9_GETATTR_SIZE);
+                match tgetattr.send_tgetattr() {
+                    Ok(_) => match RgetattrMessage::read_response() {
+                        P9Response::Success(rgetattr) => rgetattr.size + offset,
+                        P9Response::Error(_) => {
+                            // Fallback: use cursor if getattr fails
+                            file_desc.cursor + offset
+                        }
+                    },
+                    Err(_) => {
+                        // Fallback: use cursor if getattr fails
+                        file_desc.cursor + offset
+                    }
+                }
+            } else {
+                file_desc.cursor + offset
+            }
+        }
         _ => {
             let msg = b"sys_llseek: invalid whence";
             host_log(msg.as_ptr(), msg.len());
@@ -1425,8 +1511,11 @@ pub fn sys_llseek(
         }
     };
 
-    updated_entry.cursor = new_cursor;
-    update_fd(_fd, updated_entry);
+    // Update the shared cursor in the file description
+    let mut updated_desc = file_desc;
+    updated_desc.cursor = new_cursor;
+    update_file_desc(fd_entry.file_desc_id, updated_desc);
+
     let result_ptr = result as *mut u64;
     unsafe {
         *result_ptr = new_cursor;
@@ -1691,21 +1780,26 @@ pub fn sys_pread64(_fd: u32, _buf: u32, _count: u32, _pos: u32) -> Result<u32, E
     // pread64 reads from a specific offset without changing the file position
     // We need to: save current position, seek to offset, read, restore position
 
-    // Get current file position
-    let current_pos = unsafe { FD_TABLE[_fd as usize].cursor };
+    let fd_entry = get_fd(_fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+    let current_pos = file_desc.cursor;
 
     // Seek to requested offset (note: _pos is already the offset, not pgoffset)
-    unsafe {
-        FD_TABLE[_fd as usize].cursor = _pos as u64;
-    }
+    let mut updated_desc = file_desc;
+    updated_desc.cursor = _pos as u64;
+    update_file_desc(fd_entry.file_desc_id, updated_desc);
 
     // Do the read
     let result = sys_read(_fd, _buf, _count);
 
     // Restore original file position
-    unsafe {
-        FD_TABLE[_fd as usize].cursor = current_pos;
-    }
+    let mut restored_desc = get_file_desc(fd_entry.file_desc_id);
+    restored_desc.cursor = current_pos;
+    update_file_desc(fd_entry.file_desc_id, restored_desc);
 
     result
 }
@@ -1882,44 +1976,22 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         // We don't actually track FD_CLOEXEC, just return success
         return Ok(0);
     } else if _cmd == F_DUPFD_CLOEXEC {
-        let fd = get_fd(_fd);
-        let dup = dup_fid_to(fd.fid, _arg)?;
+        let fd_entry = get_fd(_fd);
+        if fd_entry.file_desc_id == 0xFF {
+            return Err(Err::BadFd);
+        }
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        // F_DUPFD_CLOEXEC should work like dup3, but we're not implementing the full logic here
+        // For now, just duplicate the file description
+        let new_fd = _arg;
         update_fd(
-            _arg,
+            new_fd,
             FileDescriptor {
-                fid: _arg,
-                cursor: fd.cursor,
-                is_dir: false,
-                mode: fd.mode,
-                flags: fd.flags,
+                file_desc_id: fd_entry.file_desc_id,
             },
         );
-        if fd.mode != 0xFFFF_FFFF {
-            // call Tlopen with the mode
-            let tlopen = TlopenMessage::new(0, _arg, fd.mode);
-            match tlopen.send_tlopen() {
-                Ok(_bytes_written) => {
-                    // Success
-                }
-                Err(_e) => {
-                    return Err(Err::NoSys);
-                }
-            }
-            match RlopenMessage::read_response() {
-                P9Response::Success(_rlopen) => {
-                    // Success
-                }
-                P9Response::Error(_rlerror) => {
-                    return Err(Err::NoSys);
-                }
-            }
-        }
-        kprint!(
-            "sys_fcntl64: F_DUPFD_CLOEXEC: _fd={} _arg={} dup={}",
-            _fd,
-            _arg,
-            dup
-        );
+        inc_refcount(fd_entry.file_desc_id);
+        kprint!("sys_fcntl64: F_DUPFD_CLOEXEC: _fd={} _arg={}", _fd, _arg);
         return Ok(_arg);
     }
 
@@ -1942,10 +2014,15 @@ pub fn sys_getdents64(fd: u32, dirp: u32, count: u32) -> Result<u32, Err> {
     }
 
     let fd_entry = get_fd(fd);
-    let offset = fd_entry.cursor;
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
 
-    // Get the FID from the FD table
-    let fid = fd_entry.fid;
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+    let offset = file_desc.cursor;
+
+    // Get the FID from the file description
+    let fid = file_desc.fid;
     if fid == 0 {
         return Err(Err::Inval);
     }
@@ -2093,9 +2170,10 @@ pub fn sys_getdents64(fd: u32, dirp: u32, count: u32) -> Result<u32, Err> {
                     }
                 }
 
-                let mut updated_entry = fd_entry;
-                updated_entry.cursor = entry_offset;
-                update_fd(fd, updated_entry);
+                // Update the shared cursor in the file description
+                let mut updated_desc = get_file_desc(fd_entry.file_desc_id);
+                updated_desc.cursor = entry_offset;
+                update_file_desc(fd_entry.file_desc_id, updated_desc);
                 // Ensure next dirent is 8-byte aligned
                 user_offset = (user_offset + reclen as usize + 7) & !7;
                 total_bytes += reclen as usize;
@@ -2306,11 +2384,12 @@ fn get_starting_fid(_dfd: u32, filename_str: &str) -> Result<u32, Err> {
         if !(0..256).contains(&_dfd) {
             return Err(Err::Inval);
         }
-        let fid = get_fd(_dfd as u32).fid;
-        if fid == 0 {
+        let fd_entry = get_fd(_dfd as u32);
+        if fd_entry.file_desc_id == 0xFF {
             return Err(Err::NoSys);
         }
-        Ok(fid)
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        Ok(file_desc.fid)
     }
 }
 
@@ -2390,11 +2469,13 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                         kprint!("sys_openat: received Rlopen: {:?}", rlopen);
                         let is_directory = rlopen.qid.is_dir();
                         set_fd(file_fid, file_fid);
-                        unsafe {
-                            FD_TABLE[file_fid as usize].mode = p9_flags;
-                            FD_TABLE[file_fid as usize].is_dir = is_directory;
-                            FD_TABLE[file_fid as usize].flags = _flags;
-                        }
+                        // Update the file description with the correct mode, is_dir, and flags
+                        let fd_entry = get_fd(file_fid);
+                        let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+                        file_desc.mode = p9_flags;
+                        file_desc.is_dir = is_directory;
+                        file_desc.flags = _flags;
+                        update_file_desc(fd_entry.file_desc_id, file_desc);
 
                         // Handle O_TRUNC: truncate file to 0 bytes after opening
                         if (_flags & O_TRUNC) == O_TRUNC {
@@ -2474,11 +2555,13 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                         kprint!("sys_openat: received Rlcreate: {:?}", rlcreate);
                         let is_directory = rlcreate.qid.is_dir();
                         set_fd(file_fid, file_fid);
-                        unsafe {
-                            FD_TABLE[file_fid as usize].mode = p9_flags;
-                            FD_TABLE[file_fid as usize].is_dir = is_directory;
-                            FD_TABLE[file_fid as usize].flags = _flags;
-                        }
+                        // Update the file description with the correct mode, is_dir, and flags
+                        let fd_entry = get_fd(file_fid);
+                        let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+                        file_desc.mode = p9_flags;
+                        file_desc.is_dir = is_directory;
+                        file_desc.flags = _flags;
+                        update_file_desc(fd_entry.file_desc_id, file_desc);
                         Ok(file_fid)
                     }
                     P9Response::Error(rlerror) => {
@@ -2617,11 +2700,12 @@ pub fn sys_statx(
         // Stat the file descriptor itself
         kprint!("sys_statx: AT_EMPTY_PATH set, statting fd {}", _dfd);
         let fd_entry = get_fd(_dfd);
-        if fd_entry.fid == 0 {
+        if fd_entry.file_desc_id == 0xFF {
             kprint!("sys_statx: invalid fd {}", _dfd);
             return Err(Err::Inval);
         }
-        fd_entry.fid
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        file_desc.fid
     } else {
         // Normal path resolution
         // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
@@ -2781,7 +2865,7 @@ fn convert_rgetattr_to_statx(rgetattr: &RgetattrMessage) -> Statx {
 // make a fd
 pub fn find_free_fd() -> Result<u32, Err> {
     let mut fd = 0;
-    while fd < 256 && get_fd(fd).fid != 0 {
+    while fd < 256 && get_fd(fd).file_desc_id != 0xFF {
         fd += 1;
     }
     if fd >= 256 {
@@ -2793,14 +2877,25 @@ pub fn find_free_fd() -> Result<u32, Err> {
 
 #[allow(dead_code)]
 pub fn set_fd(fd: u32, fid: u32) {
-    update_fd(
-        fd,
-        FileDescriptor {
+    // Allocate a new file description
+    let desc_id = find_free_file_desc().unwrap_or(0);
+    update_file_desc(
+        desc_id,
+        FileDescription {
             fid,
             cursor: 0,
             is_dir: false,
             mode: 0xFFFF_FFFF,
             flags: 0,
+            refcount: 1, // Initial reference
+        },
+    );
+
+    // Point the fd to this file description
+    update_fd(
+        fd,
+        FileDescriptor {
+            file_desc_id: desc_id,
         },
     );
 }
