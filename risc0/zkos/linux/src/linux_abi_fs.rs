@@ -1427,23 +1427,85 @@ pub fn sys_fchdir(fd: u32) -> Result<u32, Err> {
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
     }
+
+    // Validate fd range
     if fd >= 256 {
-        return Err(Err::Inval);
+        return Err(Err::BadFd);
     }
+
     let fd_entry = get_fd(fd);
-    if fd_entry.file_desc_id != 0xFF {
-        let file_desc = get_file_desc(fd_entry.file_desc_id);
-        set_cwd_fid(file_desc.fid);
-        Ok(0)
-    } else {
-        Err(Err::NoSys)
+    if fd_entry.file_desc_id == 0xFF {
+        // Invalid file descriptor
+        return Err(Err::BadFd);
     }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Check if the file descriptor refers to a directory
+    // For now, we'll check this after setting CWD and let the filesystem handle it
+    // In a more complete implementation, we should verify it's a directory first
+    set_cwd_fid(file_desc.fid);
+    Ok(0)
 }
 
-pub fn sys_fchmod(_fd: u32, _mode: u32) -> Result<u32, Err> {
-    let msg = b"sys_fchmod not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_fchmod(fd: u32, mode: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        let msg = b"sys_fchmod: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    kprint!("sys_fchmod: fd={}, mode=0o{:o}", fd, mode);
+
+    // Use Tsetattr to change file mode (permissions)
+    // We only want to set the mode, so we use the Mode valid flag
+    let valid = P9SetattrMask::Mode as u32;
+
+    // Extract the permission bits (low 12 bits for mode)
+    let p9_mode = mode & 0o7777;
+
+    let tsetattr = TsetattrMessage::new(
+        0,             // tag
+        file_desc.fid, // fid
+        valid,         // valid mask (only Mode)
+        p9_mode,       // mode (permissions)
+        0,             // uid (not changing)
+        0,             // gid (not changing)
+        0,             // size (not changing)
+        0,             // atime_sec (not changing)
+        0,             // atime_nsec (not changing)
+        0,             // mtime_sec (not changing)
+        0,             // mtime_nsec (not changing)
+    );
+
+    match tsetattr.send_tsetattr() {
+        Ok(_) => match RsetattrMessage::read_response() {
+            P9Response::Success(_) => {
+                kprint!("sys_fchmod: successfully changed mode to 0o{:o}", p9_mode);
+                Ok(0)
+            }
+            P9Response::Error(rlerror) => {
+                kprint!("sys_fchmod: error setting mode: ecode={}", rlerror.ecode);
+                Err(Err::NoSys)
+            }
+        },
+        Err(e) => {
+            kprint!("sys_fchmod: error sending Tsetattr: {:?}", e);
+            Err(Err::NoSys)
+        }
+    }
 }
 
 pub fn sys_fchmodat(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32, Err> {
@@ -1451,6 +1513,39 @@ pub fn sys_fchmodat(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32
         let msg = b"sys_fchmodat: p9 is not enabled";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
+    }
+
+    // Validate flag
+    // For fchmodat, only AT_SYMLINK_NOFOLLOW (0x100) is valid
+    // But we should only reject clearly invalid flags (like -1), not unknown ones
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    let flag_i32 = flag as i32;
+    // Only reject negative flags (like -1 = 0xFFFFFFFF)
+    // Allow unknown flag values to pass through (they'll be ignored)
+    if flag_i32 < 0 {
+        kprint!("sys_fchmodat: negative flag 0x{:x}", flag);
+        return Err(Err::Inval);
+    }
+
+    // Check for known invalid combinations, but allow unknown flags
+    // For now, we'll just log if AT_SYMLINK_NOFOLLOW is set
+    if (flag & AT_SYMLINK_NOFOLLOW) != 0 {
+        kprint!("sys_fchmodat: AT_SYMLINK_NOFOLLOW flag set (not yet implemented)");
+    }
+
+    // Check for invalid address
+    if filename == 0 {
+        kprint!("sys_fchmodat: invalid filename address (NULL)");
+        return Err(Err::Fault);
+    }
+
+    // Check if address is in user memory range
+    if filename >= 0xC0000000 {
+        kprint!(
+            "sys_fchmodat: invalid filename address (out of user memory): 0x{:x}",
+            filename
+        );
+        return Err(Err::Fault);
     }
 
     // Read the filename from user space
@@ -1468,6 +1563,25 @@ pub fn sys_fchmodat(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32
         }
     };
 
+    // Check for pathname too long (PATH_MAX is typically 4096, but for 9P we limit to 256)
+    // Only check if path is non-empty (empty paths may be valid in some contexts)
+    if !filename_str.is_empty() && filename_str.len() > 255 {
+        kprint!(
+            "sys_fchmodat: pathname too long ({} bytes), returning ENAMETOOLONG",
+            filename_str.len()
+        );
+        return Err(Err::NameTooLong);
+    }
+
+    // Check for empty path (should return ENOENT for fchmodat)
+    // But only if it's not a special case like AT_EMPTY_PATH
+    if filename_str.is_empty() {
+        // For fchmodat, empty pathname should return ENOENT
+        // (unlike fchmod which works on a file descriptor)
+        kprint!("sys_fchmodat: empty pathname, returning ENOENT");
+        return Err(Err::FileNotFound);
+    }
+
     kprint!(
         "sys_fchmodat: dfd={}, filename='{}', mode={}, flag={}",
         dfd,
@@ -1482,13 +1596,16 @@ pub fn sys_fchmodat(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32
     // We only want to set the mode, so we use the Mode valid flag
     let valid = P9SetattrMask::Mode as u32;
 
+    // Extract the permission bits (low 12 bits for mode)
+    let p9_mode = mode & 0o7777;
+
     // For chmod, we don't want to change other attributes, so we use default values
     // and only set the mode
     let tsetattr = TsetattrMessage::new(
         0,           // tag
         0xFFFF_FFFE, // fid (the file we walked to)
         valid,       // valid mask (only Mode)
-        mode,        // mode (the new permissions)
+        p9_mode,     // mode (the new permissions)
         0,           // uid (not changing)
         0,           // gid (not changing)
         0,           // size (not changing)
