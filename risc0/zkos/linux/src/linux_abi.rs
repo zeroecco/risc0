@@ -433,6 +433,7 @@ pub const SYS_WAITID: u32 = 95;
 #[derive(Clone, Copy)]
 pub enum Err {
     FileNotFound = -2, // ENOENT
+    IO = -5,           // EIO - I/O error
     BadFd = -9,        // EBADF - Bad file descriptor
     NoMem = -12,       // ENOMEM
     Fault = -14,       // EFAULT - Bad address
@@ -444,6 +445,8 @@ pub enum Err {
     FileTooBig = -27,  // EFBIG - File too large
     NameTooLong = -36, // ENAMETOOLONG - File name too long
     NoSys = -38,       // ENOSYS - Function not implemented
+    NoData = -61,      // ENODATA - No data available
+    Range = -75,       // ERANGE/E2BIG - Result too large
 }
 
 impl Err {

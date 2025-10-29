@@ -59,12 +59,6 @@ pub const F_WRLCK: u32 = 1; // Write lock
 #[allow(dead_code)]
 pub const F_UNLCK: u32 = 2; // Unlock
 
-// File lease constants
-#[allow(dead_code)]
-pub const F_SETLEASE: u32 = 1024; // Set a file lease
-#[allow(dead_code)]
-pub const F_GETLEASE: u32 = 1025; // Get a file lease
-
 pub static mut ROOT_FID: u32 = 0;
 pub static mut CWD_FID: u32 = 0;
 pub static mut CWD_STR: String = String::new();
@@ -2102,10 +2096,101 @@ pub fn sys_fdatasync(_fd: u32) -> Result<u32, Err> {
     Err(Err::NoSys)
 }
 
-pub fn sys_fgetxattr(_fd: u32, _name: u32, _value: u32, _size: u32) -> Result<u32, Err> {
-    let msg = b"sys_fgetxattr not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_fgetxattr(fd: u32, name: u32, value: u32, size: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        return Err(Err::NoSys);
+    }
+
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Parse the xattr name
+    let name_buf = unsafe { core::slice::from_raw_parts(name as *const u8, 256) };
+    let name_null_pos = name_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(name_buf.len());
+    let name_str = match str::from_utf8(&name_buf[..name_null_pos]) {
+        Ok(s) => s,
+        Err(_) => return Err(Err::Inval),
+    };
+
+    kprint!(
+        "sys_fgetxattr: fd={} name='{}' value=0x{:x} size={}",
+        fd,
+        name_str,
+        value,
+        size
+    );
+
+    // Use Txattrwalk to get the xattr
+    let txattrwalk =
+        crate::p9::TxattrwalkMessage::new(0, file_desc.fid, 0xFFFF_FFF9, name_str.to_string());
+
+    match txattrwalk.send_txattrwalk() {
+        Ok(_) => {}
+        Err(_) => return Err(Err::NoSys),
+    }
+
+    match crate::p9::RxattrwalkMessage::read_response() {
+        crate::p9::P9Response::Success(rxattrwalk) => {
+            let xattr_size = rxattrwalk.size;
+            kprint!("sys_fgetxattr: xattr size = {}", xattr_size);
+
+            // If size is 0, just return the size
+            if size == 0 {
+                clunk(0xFFFF_FFF9, false);
+                return Ok(xattr_size as u32);
+            }
+
+            // If buffer is too small, return the required size
+            if size < xattr_size as u32 {
+                clunk(0xFFFF_FFF9, false);
+                return Err(Err::Range); // E2BIG
+            }
+
+            // Read the xattr value
+            let tread = crate::p9::TreadMessage::new(0, 0xFFFF_FFF9, 0, xattr_size as u32);
+            match tread.send_tread() {
+                Ok(_) => {}
+                Err(_) => {
+                    clunk(0xFFFF_FFF9, false);
+                    return Err(Err::NoSys);
+                }
+            }
+
+            match crate::p9::RreadMessage::read_response() {
+                crate::p9::P9Response::Success(rread) => {
+                    let data_len = rread.data.len().min(size as usize);
+                    if value != 0 {
+                        unsafe {
+                            let dest = core::slice::from_raw_parts_mut(value as *mut u8, data_len);
+                            dest.copy_from_slice(&rread.data[..data_len]);
+                        }
+                    }
+                    clunk(0xFFFF_FFF9, false);
+                    Ok(data_len as u32)
+                }
+                crate::p9::P9Response::Error(_) => {
+                    clunk(0xFFFF_FFF9, false);
+                    Err(Err::NoSys)
+                }
+            }
+        }
+        crate::p9::P9Response::Error(rlerror) => {
+            kprint!("sys_fgetxattr: xattrwalk failed: ecode={}", rlerror.ecode);
+            Err(Err::NoData) // ENODATA - no such attribute
+        }
+    }
 }
 
 pub fn sys_file_getattr(_dfd: u32, _filename: u32, _mask: u32) -> Result<u32, Err> {
@@ -2214,16 +2299,130 @@ pub fn sys_fsync(_fd: u32) -> Result<u32, Err> {
     Err(Err::NoSys)
 }
 
-pub fn sys_fsetxattr(
-    _fd: u32,
-    _name: u32,
-    _value: u32,
-    _size: u32,
-    _flags: u32,
-) -> Result<u32, Err> {
-    let msg = b"sys_fsetxattr not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_fsetxattr(fd: u32, name: u32, value: u32, size: u32, flags: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        return Err(Err::NoSys);
+    }
+
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Parse the xattr name
+    let name_buf = unsafe { core::slice::from_raw_parts(name as *const u8, 256) };
+    let name_null_pos = name_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(name_buf.len());
+    let name_str = match str::from_utf8(&name_buf[..name_null_pos]) {
+        Ok(s) => s,
+        Err(_) => return Err(Err::Inval),
+    };
+
+    kprint!(
+        "sys_fsetxattr: fd={} name='{}' value=0x{:x} size={} flags={}",
+        fd,
+        name_str,
+        value,
+        size,
+        flags
+    );
+
+    // Use Txattrcreate to prepare to set the xattr
+    // We need to allocate a new FID for the xattr operation
+    // The FID passed to Txattrcreate will be used for writing the xattr value
+    let xattr_fid = 0xFFFF_FFF8; // Use a temporary FID for the xattr
+    
+    // First, walk to duplicate the file's FID to the xattr FID
+    let twalk = crate::p9::TwalkMessage::new(0, file_desc.fid, xattr_fid, vec![]);
+    match twalk.send_twalk() {
+        Ok(_) => {}
+        Err(_) => return Err(Err::NoSys),
+    }
+    
+    match crate::p9::RwalkMessage::read_response() {
+        crate::p9::P9Response::Success(_) => {
+            kprint!("sys_fsetxattr: walked to duplicate fid={}", xattr_fid);
+        }
+        crate::p9::P9Response::Error(rlerror) => {
+            kprint!("sys_fsetxattr: walk failed: ecode={}", rlerror.ecode);
+            return Err(Err::NoSys);
+        }
+    }
+    
+    // Now use Txattrcreate with the xattr FID
+    let txattrcreate = crate::p9::TxattrcreateMessage::new(
+        0,
+        xattr_fid, // The FID that will be used for the xattr
+        name_str.to_string(),
+        size as u64,
+        flags,
+    );
+
+    match txattrcreate.send_txattrcreate() {
+        Ok(_) => {}
+        Err(_) => {
+            clunk(xattr_fid, false);
+            return Err(Err::NoSys);
+        }
+    }
+
+    match crate::p9::RxattrcreateMessage::read_response() {
+        crate::p9::P9Response::Success(_) => {
+            kprint!("sys_fsetxattr: xattrcreate succeeded, using fid={}", xattr_fid);
+
+            // Now write the xattr value to the xattr FID
+            if size > 0 && value != 0 {
+                let value_buf =
+                    unsafe { core::slice::from_raw_parts(value as *const u8, size as usize) };
+
+                // Write to the xattr FID
+                let twrite = crate::p9::TwriteMessage::new(0, xattr_fid, 0, value_buf.to_vec());
+                match twrite.send_twrite() {
+                    Ok(_) => {}
+                    Err(_) => {
+                        clunk(xattr_fid, false);
+                        return Err(Err::NoSys);
+                    }
+                }
+
+                match crate::p9::RwriteMessage::read_response() {
+                    crate::p9::P9Response::Success(rwrite) => {
+                        kprint!("sys_fsetxattr: wrote {} bytes", rwrite.count);
+                        if rwrite.count != size {
+                            kprint!(
+                                "sys_fsetxattr: write size mismatch: expected {}, got {}",
+                                size,
+                                rwrite.count
+                            );
+                            clunk(xattr_fid, false);
+                            return Err(Err::IO);
+                        }
+                    }
+                    crate::p9::P9Response::Error(_) => {
+                        clunk(xattr_fid, false);
+                        return Err(Err::NoSys);
+                    }
+                }
+            }
+
+            // Clunk the xattr FID to commit the xattr
+            clunk(xattr_fid, false);
+            Ok(0)
+        }
+        crate::p9::P9Response::Error(rlerror) => {
+            kprint!("sys_fsetxattr: xattrcreate failed: ecode={}", rlerror.ecode);
+            Err(Err::NoSys)
+        }
+    }
 }
 
 pub fn sys_getcwd(_buf: u32, _size: u32) -> Result<u32, Err> {
@@ -2921,8 +3120,6 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         F_GETLK,
         F_SETLK,
         F_SETLKW,
-        F_SETLEASE,
-        F_GETLEASE,
         F_DUPFD_CLOEXEC,
     ];
 
@@ -3117,20 +3314,6 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         // In zkVM, we don't have real file locking, so we just succeed
         kprint!("sys_fcntl64: F_SETLK/F_SETLKW success (no-op in zkVM)");
         return Ok(0);
-    } else if _cmd == F_SETLEASE {
-        // Set a file lease
-        // In zkVM, we don't have real file leasing, so we just succeed
-        kprint!("sys_fcntl64: F_SETLEASE fd={} lease_type={}", _fd, _arg);
-        // _arg should be F_RDLCK (0), F_WRLCK (1), or F_UNLCK (2)
-        // TODO: Store lease type if we need more sophisticated lease tracking
-        return Ok(0);
-    } else if _cmd == F_GETLEASE {
-        // Get current file lease
-        // In zkVM, we don't have real file leasing
-        // For now, just return F_RDLCK since most tests set read leases
-        kprint!("sys_fcntl64: F_GETLEASE fd={}", _fd);
-        // TODO: Return the actual lease type that was set
-        return Ok(F_RDLCK);
     }
 
     // Unsupported command

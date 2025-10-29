@@ -5070,6 +5070,24 @@ impl RxattrwalkMessage {
     }
 }
 
+impl MessageError for RxattrwalkError {
+    fn buffer_too_small() -> Self {
+        RxattrwalkError::BufferTooSmall
+    }
+
+    fn invalid_message_type() -> Self {
+        RxattrwalkError::InvalidMessageType
+    }
+}
+
+impl ReadableMessage for RxattrwalkMessage {
+    type Error = RxattrwalkError;
+
+    fn deserialize(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+        RxattrwalkMessage::deserialize(buf)
+    }
+}
+
 /// Txattrcreate message structure
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxattrcreateMessage {
@@ -5235,6 +5253,24 @@ impl RxattrcreateMessage {
         offset = new_offset;
 
         Ok((Self { tag }, offset))
+    }
+}
+
+impl MessageError for RxattrcreateError {
+    fn buffer_too_small() -> Self {
+        RxattrcreateError::BufferTooSmall
+    }
+
+    fn invalid_message_type() -> Self {
+        RxattrcreateError::InvalidMessageType
+    }
+}
+
+impl ReadableMessage for RxattrcreateMessage {
+    type Error = RxattrcreateError;
+
+    fn deserialize(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+        RxattrcreateMessage::deserialize(buf)
     }
 }
 
