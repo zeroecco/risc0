@@ -1641,16 +1641,73 @@ pub fn sys_fchmodat(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32
     }
 }
 
-pub fn sys_fchmodat2(_dfd: u32, _filename: u32, _mode: u32, _flag: u32) -> Result<u32, Err> {
-    let msg = b"sys_fchmodat2 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_fchmodat2(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32, Err> {
+    // fchmodat2 is essentially the same as fchmodat, just delegate to it
+    sys_fchmodat(dfd, filename, mode, flag)
 }
 
-pub fn sys_fchown(_fd: u32, _user: u32, _group: u32) -> Result<u32, Err> {
-    let msg = b"sys_fchown not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_fchown(fd: u32, user: u32, group: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        let msg = b"sys_fchown: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    kprint!("sys_fchown: fd={}, uid={}, gid={}", fd, user, group);
+
+    // Use Tsetattr to change file ownership
+    // We want to set both uid and gid, so we use both User and Group valid flags
+    let valid = P9SetattrMask::Uid as u32 | P9SetattrMask::Gid as u32;
+
+    let tsetattr = TsetattrMessage::new(
+        0,             // tag
+        file_desc.fid, // fid
+        valid,         // valid mask (Uid and Gid)
+        0,             // mode (not changing)
+        user,          // uid (the new user ID)
+        group,         // gid (the new group ID)
+        0,             // size (not changing)
+        0,             // atime_sec (not changing)
+        0,             // atime_nsec (not changing)
+        0,             // mtime_sec (not changing)
+        0,             // mtime_nsec (not changing)
+    );
+
+    match tsetattr.send_tsetattr() {
+        Ok(_) => match RsetattrMessage::read_response() {
+            P9Response::Success(_) => {
+                kprint!(
+                    "sys_fchown: successfully changed ownership to uid={}, gid={}",
+                    user,
+                    group
+                );
+                Ok(0)
+            }
+            P9Response::Error(rlerror) => {
+                kprint!(
+                    "sys_fchown: error setting ownership: ecode={}",
+                    rlerror.ecode
+                );
+                Err(Err::NoSys)
+            }
+        },
+        Err(e) => {
+            kprint!("sys_fchown: error sending Tsetattr: {:?}", e);
+            Err(Err::NoSys)
+        }
+    }
 }
 
 pub fn sys_fchownat(dfd: u32, filename: u32, user: u32, group: u32, flag: u32) -> Result<u32, Err> {
@@ -1658,6 +1715,18 @@ pub fn sys_fchownat(dfd: u32, filename: u32, user: u32, group: u32, flag: u32) -
         let msg = b"sys_fchownat: p9 is not enabled";
         host_log(msg.as_ptr(), msg.len());
         return Err(Err::NoSys);
+    }
+
+    // Validate flag (AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH are valid flags)
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_FLAGS_MASK: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    // Only reject negative flags (like -1 = 0xFFFFFFFF)
+    let flag_i32 = flag as i32;
+    if flag_i32 < 0 || (flag & !AT_FLAGS_MASK) != 0 {
+        kprint!("sys_fchownat: invalid flag 0x{:x}", flag);
+        return Err(Err::Inval);
     }
 
     // Read the filename from user space
@@ -1684,11 +1753,99 @@ pub fn sys_fchownat(dfd: u32, filename: u32, user: u32, group: u32, flag: u32) -
         flag
     );
 
-    resolve_path(dfd, filename_str, 0xFFFF_FFFE)?;
+    // Handle AT_SYMLINK_NOFOLLOW: don't follow symlinks, operate on the symlink itself
+    if (flag & AT_SYMLINK_NOFOLLOW) != 0 {
+        kprint!("sys_fchownat: AT_SYMLINK_NOFOLLOW flag set, operating on symlink directly");
+
+        // Walk to the file without following symlinks
+        let starting_fid = get_starting_fid(dfd, filename_str)?;
+        let (dir_path, file_name) = split_path(filename_str);
+        kprint!(
+            "sys_fchownat: dir_path='{}', file_name='{}'",
+            dir_path,
+            file_name
+        );
+
+        // For relative paths, use the dfd directly as the directory
+        let dir_fid = if dir_path.is_empty() || dir_path == "." {
+            // Relative path - use dfd as the directory
+            starting_fid
+        } else {
+            // Absolute path - walk to the directory first
+            let dir_path = normalize_path(&dir_path);
+            if do_walk(starting_fid, 0xFFFF_FFFB, dir_path).is_err() {
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::FileNotFound);
+            }
+            0xFFFF_FFFB
+        };
+
+        // Now walk to the final component (the symlink itself) without following
+        // We use Twalk directly on just the final component to avoid symlink resolution
+        let file_path = vec![file_name.clone()];
+        kprint!(
+            "sys_fchownat: walking to symlink: dir_fid={}, file_name='{}', target_fid=0xFFFF_FFFE",
+            dir_fid,
+            file_name
+        );
+        let twalk = crate::p9::TwalkMessage::new(0, dir_fid, 0xFFFF_FFFE, file_path.clone());
+        match twalk.send_twalk() {
+            Ok(_) => match RwalkMessage::read_response() {
+                P9Response::Success(rwalk) => {
+                    if rwalk.wqids.len() != 1 {
+                        clunk(0xFFFF_FFFE, false);
+                        clunk(0xFFFF_FFFB, false);
+                        return Err(Err::FileNotFound);
+                    }
+
+                    // Check if the final component is a symlink
+                    if let Some(last_qid) = rwalk.wqids.last() {
+                        if last_qid.is_symlink() {
+                            kprint!(
+                                "sys_fchownat: symlink detected with AT_SYMLINK_NOFOLLOW, operating on symlink directly"
+                            );
+                            // We have the symlink FID at 0xFFFF_FFFE, don't follow it
+                        } else {
+                            kprint!("sys_fchownat: not a symlink, operating normally");
+                            // Not a symlink, continue normally
+                        }
+                    }
+                }
+                P9Response::Error(rlerror) => {
+                    kprint!(
+                        "sys_fchownat: error walking to file: ecode={}",
+                        rlerror.ecode
+                    );
+                    if dir_path.is_empty() || dir_path == "." {
+                        // No cleanup needed for relative paths
+                    } else {
+                        clunk(0xFFFF_FFFB, false);
+                    }
+                    return Err(Err::FileNotFound);
+                }
+            },
+            Err(e) => {
+                kprint!("sys_fchownat: error sending Twalk: {:?}", e);
+                if !dir_path.is_empty() && dir_path != "." {
+                    clunk(0xFFFF_FFFB, false);
+                }
+                return Err(Err::NoSys);
+            }
+        }
+    } else {
+        // Normal path resolution (follows symlinks)
+        resolve_path(dfd, filename_str, 0xFFFF_FFFE)?;
+    }
 
     // Create Tsetattr message for chown operation
     // We only want to set UID and GID, so we use the appropriate valid flags
     let valid = P9SetattrMask::Uid as u32 | P9SetattrMask::Gid as u32;
+
+    kprint!(
+        "sys_fchownat: calling Tsetattr on FID 0xFFFF_FFFE with user={}, group={}",
+        user,
+        group
+    );
 
     // For chown, we don't want to change other attributes, so we use default values
     // and only set the UID and GID
@@ -1719,6 +1876,15 @@ pub fn sys_fchownat(dfd: u32, filename: u32, user: u32, group: u32, flag: u32) -
     match RsetattrMessage::read_response() {
         P9Response::Success(rsetattr) => {
             kprint!("sys_fchownat: rsetattr = {:?}", rsetattr);
+
+            // Clean up temporary FIDs if we used AT_SYMLINK_NOFOLLOW
+            if (flag & AT_SYMLINK_NOFOLLOW) != 0 {
+                let (dir_path, _) = split_path(filename_str);
+                if !dir_path.is_empty() && dir_path != "." {
+                    clunk(0xFFFF_FFFB, false);
+                }
+            }
+
             Ok(0)
         }
         P9Response::Error(rlerror) => {
@@ -1727,6 +1893,15 @@ pub fn sys_fchownat(dfd: u32, filename: u32, user: u32, group: u32, flag: u32) -
                 rlerror.tag,
                 rlerror.ecode
             );
+
+            // Clean up temporary FIDs if we used AT_SYMLINK_NOFOLLOW
+            if (flag & AT_SYMLINK_NOFOLLOW) != 0 {
+                let (dir_path, _) = split_path(filename_str);
+                if !dir_path.is_empty() && dir_path != "." {
+                    clunk(0xFFFF_FFFB, false);
+                }
+            }
+
             Ok(-(rlerror.ecode as i32) as u32)
         }
     }
@@ -2732,7 +2907,7 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         if fd_entry.file_desc_id == 0xFF {
             return Err(Err::BadFd);
         }
-        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        let _file_desc = get_file_desc(fd_entry.file_desc_id);
         // F_DUPFD_CLOEXEC should work like dup3, but we're not implementing the full logic here
         // For now, just duplicate the file description
         let new_fd = _arg;
@@ -3465,6 +3640,8 @@ pub fn sys_statx(
 
     // AT_EMPTY_PATH flag (0x1000) - if filename is empty, stat the fd itself
     const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+
     if (_flags & AT_EMPTY_PATH) != 0 && _dfd < 3 {
         // FIXME this doesn't return a statx buffer, it returns 0
         return Ok(0);
@@ -3479,8 +3656,56 @@ pub fn sys_statx(
         }
         let file_desc = get_file_desc(fd_entry.file_desc_id);
         file_desc.fid
+    } else if (_flags & AT_SYMLINK_NOFOLLOW) != 0 {
+        // Don't follow symlinks - use Twalk directly on the final component
+        kprint!("sys_statx: AT_SYMLINK_NOFOLLOW set, not following symlinks");
+        let starting_fid = get_starting_fid(_dfd, filename)?;
+        let (dir_path, file_name) = split_path(filename);
+
+        // For relative paths, use the dfd directly as the directory
+        let dir_fid = if dir_path.is_empty() || dir_path == "." {
+            starting_fid
+        } else {
+            let dir_path = normalize_path(&dir_path);
+            do_walk(starting_fid, 0xFFFF_FFFB, dir_path)?;
+            0xFFFF_FFFB
+        };
+
+        // Walk to the final component without following symlinks
+        let file_path = vec![file_name];
+        let twalk = crate::p9::TwalkMessage::new(0, dir_fid, 0xFFFF_FFFE, file_path);
+        match twalk.send_twalk() {
+            Ok(_) => match RwalkMessage::read_response() {
+                P9Response::Success(rwalk) => {
+                    if rwalk.wqids.len() != 1 {
+                        clunk(0xFFFF_FFFE, false);
+                        if dir_fid != starting_fid {
+                            clunk(dir_fid, false);
+                        }
+                        return Err(Err::FileNotFound);
+                    }
+                    // Clean up directory fid if we allocated one
+                    if dir_fid != starting_fid {
+                        clunk(dir_fid, false);
+                    }
+                }
+                P9Response::Error(_) => {
+                    if dir_fid != starting_fid {
+                        clunk(dir_fid, false);
+                    }
+                    return Err(Err::FileNotFound);
+                }
+            },
+            Err(_) => {
+                if dir_fid != starting_fid {
+                    clunk(dir_fid, false);
+                }
+                return Err(Err::NoSys);
+            }
+        }
+        0xFFFF_FFFE
     } else {
-        // Normal path resolution
+        // Normal path resolution (follows symlinks)
         // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
         let starting_fid = get_starting_fid(_dfd, filename)?;
         let (dir_path, file_name) = split_path(filename);
