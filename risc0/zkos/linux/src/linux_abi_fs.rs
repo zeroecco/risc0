@@ -43,6 +43,22 @@ pub const F_GETFL: u32 = 3; // Get file status flags.
 pub const F_SETFL: u32 = 4; // Set file status flags.
 pub const FD_CLOEXEC: u32 = 1; // Close on exec flag.
 
+// File locking constants
+#[allow(dead_code)]
+pub const F_GETLK: u32 = 12; // Get file lock
+#[allow(dead_code)]
+pub const F_SETLK: u32 = 13; // Set file lock
+#[allow(dead_code)]
+pub const F_SETLKW: u32 = 14; // Set file lock (wait)
+
+// Lock types
+#[allow(dead_code)]
+pub const F_RDLCK: u32 = 0; // Read lock
+#[allow(dead_code)]
+pub const F_WRLCK: u32 = 1; // Write lock
+#[allow(dead_code)]
+pub const F_UNLCK: u32 = 2; // Unlock
+
 pub static mut ROOT_FID: u32 = 0;
 pub static mut CWD_FID: u32 = 0;
 pub static mut CWD_STR: String = String::new();
@@ -2885,7 +2901,41 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         return Err(Err::BadFd);
     }
 
-    if _cmd == F_GETFD {
+    if _cmd == F_DUPFD {
+        // Duplicate file descriptor with lowest available fd >= _arg
+        kprint!("sys_fcntl64: F_DUPFD fd={} arg={}", _fd, _arg);
+
+        // Find the lowest available fd >= _arg
+        let start_fd = _arg.max(3); // Start from at least 3 (after stdin/stdout/stderr)
+        let mut new_fd = None;
+        for candidate in start_fd..256 {
+            let candidate_entry = get_fd(candidate);
+            if candidate_entry.file_desc_id == 0xFF {
+                new_fd = Some(candidate);
+                break;
+            }
+        }
+
+        match new_fd {
+            Some(fd) => {
+                // Duplicate the file description
+                update_fd(
+                    fd,
+                    FileDescriptor {
+                        file_desc_id: fd_entry.file_desc_id,
+                        cloexec: false, // F_DUPFD does not set FD_CLOEXEC
+                    },
+                );
+                inc_refcount(fd_entry.file_desc_id);
+                kprint!("sys_fcntl64: F_DUPFD allocated fd {}", fd);
+                return Ok(fd);
+            }
+            None => {
+                kprint!("sys_fcntl64: F_DUPFD no available fd");
+                return Err(Err::MFile);
+            }
+        }
+    } else if _cmd == F_GETFD {
         // Get file descriptor flags (only FD_CLOEXEC is relevant)
         let flags = if fd_entry.cloexec { FD_CLOEXEC } else { 0 };
         kprint!(
@@ -2901,6 +2951,39 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         updated_entry.cloexec = new_cloexec;
         update_fd(_fd, updated_entry);
         kprint!("sys_fcntl64: F_SETFD setting FD_CLOEXEC to {}", new_cloexec);
+        return Ok(0);
+    } else if _cmd == F_GETFL {
+        // Get file status flags (O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_NONBLOCK, etc.)
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        let flags = file_desc.flags;
+        kprint!("sys_fcntl64: F_GETFL returning 0x{:x}", flags);
+        return Ok(flags);
+    } else if _cmd == F_SETFL {
+        // Set file status flags (only certain flags can be set: O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT)
+        // O_RDONLY, O_WRONLY, O_RDWR, and other open-time flags cannot be changed
+        const O_APPEND: u32 = 0o2000; // 0x400
+        const O_NONBLOCK: u32 = 0o4000; // 0x800 (also O_NDELAY)
+        const O_ASYNC: u32 = 0o20000; // 0x2000
+        const O_DIRECT: u32 = 0o40000; // 0x4000
+        const O_NOATIME: u32 = 0o1000000; // 0x40000
+
+        const SETTABLE_FLAGS: u32 = O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME;
+
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        // Keep the access mode (O_RDONLY/O_WRONLY/O_RDWR) from the original flags
+        let access_mode = file_desc.mode & 0x3; // O_ACCMODE = 0x3
+        // Update only the settable flags
+        let new_flags = access_mode | (_arg & SETTABLE_FLAGS);
+
+        let mut updated_desc = file_desc;
+        updated_desc.flags = new_flags;
+        update_file_desc(fd_entry.file_desc_id, updated_desc);
+
+        kprint!(
+            "sys_fcntl64: F_SETFL old_flags=0x{:x} new_flags=0x{:x}",
+            file_desc.flags,
+            new_flags
+        );
         return Ok(0);
     } else if _cmd == F_DUPFD_CLOEXEC {
         let fd_entry = get_fd(_fd);
@@ -2921,6 +3004,39 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         inc_refcount(fd_entry.file_desc_id);
         kprint!("sys_fcntl64: F_DUPFD_CLOEXEC: _fd={} _arg={}", _fd, _arg);
         return Ok(_arg);
+    } else if _cmd == F_GETLK {
+        // Get file lock status
+        // In zkVM, we don't have real file locking, so we always report F_UNLCK (no lock)
+        kprint!("sys_fcntl64: F_GETLK fd={} flock_ptr=0x{:x}", _fd, _arg);
+
+        // The _arg is a pointer to struct flock
+        // struct flock {
+        //     short l_type;    /* Type of lock: F_RDLCK, F_WRLCK, F_UNLCK */
+        //     short l_whence;  /* How to interpret l_start: SEEK_SET, SEEK_CUR, SEEK_END */
+        //     off_t l_start;   /* Starting offset for lock */
+        //     off_t l_len;     /* Number of bytes to lock */
+        //     pid_t l_pid;     /* PID of process blocking our lock (F_GETLK only) */
+        // };
+
+        // Read the current flock structure to preserve whence, start, len, pid
+        // We only modify l_type to F_UNLCK
+        if _arg == 0 {
+            return Err(Err::Fault);
+        }
+
+        // Write F_UNLCK (2) to l_type field (first 2 bytes)
+        unsafe {
+            let l_type_ptr = _arg as *mut u16;
+            *l_type_ptr = F_UNLCK as u16;
+        }
+
+        kprint!("sys_fcntl64: F_GETLK set l_type to F_UNLCK");
+        return Ok(0);
+    } else if _cmd == F_SETLK || _cmd == F_SETLKW {
+        // Set file lock (non-blocking or blocking)
+        // In zkVM, we don't have real file locking, so we just succeed
+        kprint!("sys_fcntl64: F_SETLK/F_SETLKW fd={} (no-op in zkVM)", _fd);
+        return Ok(0);
     }
 
     // Unsupported command
