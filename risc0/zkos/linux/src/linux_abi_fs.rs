@@ -1533,15 +1533,12 @@ pub fn sys_fchmodat(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u32
 
     // Validate flag
     // For fchmodat, only AT_SYMLINK_NOFOLLOW (0x100) is valid
-    // But we should only reject clearly invalid flags (like -1), not unknown ones
+    // We should be permissive with flags - only mask to the valid bits
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
-    let flag_i32 = flag as i32;
-    // Only reject negative flags (like -1 = 0xFFFFFFFF)
-    // Allow unknown flag values to pass through (they'll be ignored)
-    if flag_i32 < 0 {
-        kprint!("sys_fchmodat: negative flag 0x{:x}", flag);
-        return Err(Err::Inval);
-    }
+
+    // Mask the flag to only keep known flag bits
+    // This is more permissive - we ignore garbage in high bits
+    let flag = flag & 0xFFFF; // Keep only low 16 bits for flags
 
     // Check for known invalid combinations, but allow unknown flags
     // For now, we'll just log if AT_SYMLINK_NOFOLLOW is set
@@ -2205,16 +2202,120 @@ pub fn sys_file_setattr(_dfd: u32, _filename: u32, _mask: u32) -> Result<u32, Er
     Err(Err::NoSys)
 }
 
-pub fn sys_flistxattr(_fd: u32, _list: u32, _size: u32) -> Result<u32, Err> {
-    let msg = b"sys_flistxattr not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_flistxattr(fd: u32, list: u32, size: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        return Err(Err::NoSys);
+    }
+
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    kprint!("sys_flistxattr: fd={} list=0x{:x} size={}", fd, list, size);
+
+    // Use Txattrwalk with empty name to list xattrs
+    // When name is empty, the newfid can be used to list all xattrs
+    let list_fid = 0xFFFF_FFF7; // Use a temporary FID for listing
+    let txattrwalk = crate::p9::TxattrwalkMessage::new(
+        0,
+        file_desc.fid,
+        list_fid,
+        String::new(), // Empty string for listing all xattrs
+    );
+
+    match txattrwalk.send_txattrwalk() {
+        Ok(_) => {}
+        Err(_) => return Err(Err::NoSys),
+    }
+
+    match crate::p9::RxattrwalkMessage::read_response() {
+        crate::p9::P9Response::Success(rxattrwalk) => {
+            let xattr_list_size = rxattrwalk.size;
+            kprint!("sys_flistxattr: xattr list size = {}", xattr_list_size);
+
+            // If size is 0, just return the size
+            if size == 0 {
+                clunk(list_fid, false);
+                return Ok(xattr_list_size as u32);
+            }
+
+            // If buffer is too small, return the required size (or ERANGE)
+            if size < xattr_list_size as u32 {
+                clunk(list_fid, false);
+                return Err(Err::Range); // E2BIG
+            }
+
+            // Read the xattr list
+            let tread = crate::p9::TreadMessage::new(0, list_fid, 0, xattr_list_size as u32);
+            match tread.send_tread() {
+                Ok(_) => {}
+                Err(_) => {
+                    clunk(list_fid, false);
+                    return Err(Err::NoSys);
+                }
+            }
+
+            match crate::p9::RreadMessage::read_response() {
+                crate::p9::P9Response::Success(rread) => {
+                    let data_len = rread.data.len().min(size as usize);
+                    if list != 0 {
+                        unsafe {
+                            let dest = core::slice::from_raw_parts_mut(list as *mut u8, data_len);
+                            dest.copy_from_slice(&rread.data[..data_len]);
+                        }
+                    }
+                    clunk(list_fid, false);
+                    Ok(data_len as u32)
+                }
+                crate::p9::P9Response::Error(_) => {
+                    clunk(list_fid, false);
+                    Err(Err::NoSys)
+                }
+            }
+        }
+        crate::p9::P9Response::Error(rlerror) => {
+            kprint!("sys_flistxattr: xattrwalk failed: ecode={}", rlerror.ecode);
+            Err(Err::NoData) // ENODATA - no xattrs available
+        }
+    }
 }
 
-pub fn sys_flock(_fd: u32, _cmd: u32) -> Result<u32, Err> {
-    let msg = b"sys_flock not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_flock(fd: u32, operation: u32) -> Result<u32, Err> {
+    // Validate fd
+    if fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    let fd_entry = get_fd(fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    // flock operations (from sys/file.h):
+    // LOCK_SH = 1  (shared lock)
+    // LOCK_EX = 2  (exclusive lock)
+    // LOCK_UN = 8  (unlock)
+    // LOCK_NB = 4  (non-blocking)
+
+    kprint!("sys_flock: fd={} operation={}", fd, operation);
+
+    // In zkVM, there's no concurrent access, so file locking is a no-op
+    // Just validate the operation and succeed
+    let op = operation & !4; // Remove LOCK_NB flag for validation
+    if op != 1 && op != 2 && op != 8 {
+        kprint!("sys_flock: invalid operation {}", operation);
+        return Err(Err::Inval);
+    }
+
+    Ok(0)
 }
 
 pub fn sys_fremovexattr(_fd: u32, _name: u32) -> Result<u32, Err> {
@@ -2340,14 +2441,14 @@ pub fn sys_fsetxattr(fd: u32, name: u32, value: u32, size: u32, flags: u32) -> R
     // We need to allocate a new FID for the xattr operation
     // The FID passed to Txattrcreate will be used for writing the xattr value
     let xattr_fid = 0xFFFF_FFF8; // Use a temporary FID for the xattr
-    
+
     // First, walk to duplicate the file's FID to the xattr FID
     let twalk = crate::p9::TwalkMessage::new(0, file_desc.fid, xattr_fid, vec![]);
     match twalk.send_twalk() {
         Ok(_) => {}
         Err(_) => return Err(Err::NoSys),
     }
-    
+
     match crate::p9::RwalkMessage::read_response() {
         crate::p9::P9Response::Success(_) => {
             kprint!("sys_fsetxattr: walked to duplicate fid={}", xattr_fid);
@@ -2357,7 +2458,7 @@ pub fn sys_fsetxattr(fd: u32, name: u32, value: u32, size: u32, flags: u32) -> R
             return Err(Err::NoSys);
         }
     }
-    
+
     // Now use Txattrcreate with the xattr FID
     let txattrcreate = crate::p9::TxattrcreateMessage::new(
         0,
@@ -2377,7 +2478,10 @@ pub fn sys_fsetxattr(fd: u32, name: u32, value: u32, size: u32, flags: u32) -> R
 
     match crate::p9::RxattrcreateMessage::read_response() {
         crate::p9::P9Response::Success(_) => {
-            kprint!("sys_fsetxattr: xattrcreate succeeded, using fid={}", xattr_fid);
+            kprint!(
+                "sys_fsetxattr: xattrcreate succeeded, using fid={}",
+                xattr_fid
+            );
 
             // Now write the xattr value to the xattr FID
             if size > 0 && value != 0 {
@@ -2466,15 +2570,79 @@ pub fn sys_getxattrat(_dfd: u32, _filename: u32, _name: u32, _value: u32) -> Res
 }
 
 pub fn sys_linkat(
-    _olddirfd: u32,
-    _oldpath: u32,
-    _newdirfd: u32,
-    _newpath: u32,
+    olddfd: u32,
+    oldname: u32,
+    newdfd: u32,
+    newname: u32,
     _flags: u32,
 ) -> Result<u32, Err> {
-    let msg = b"sys_linkat not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    use crate::p9::{P9Response, RlinkMessage, TlinkMessage};
+
+    if !get_p9_enabled() {
+        return Err(Err::NoSys);
+    }
+
+    // Parse old path
+    let oldpath = unsafe { core::slice::from_raw_parts(oldname as *const u8, 256) };
+    let oldpath_len = oldpath
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(oldpath.len());
+    let oldpath_str = str::from_utf8(&oldpath[..oldpath_len]).map_err(|_| Err::Inval)?;
+
+    // Parse new path
+    let newpath = unsafe { core::slice::from_raw_parts(newname as *const u8, 256) };
+    let newpath_len = newpath
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(newpath.len());
+    let newpath_str = str::from_utf8(&newpath[..newpath_len]).map_err(|_| Err::Inval)?;
+
+    kprint!(
+        "sys_linkat: old='{}' new='{}', flags=0x{:x}",
+        oldpath_str,
+        newpath_str,
+        _flags
+    );
+
+    // Walk to the old file to get its FID
+    let old_fid = 0xFFFF_FFF6; // Temporary FID for old file
+    resolve_path(olddfd, oldpath_str, old_fid)?;
+
+    // Split new path into directory and filename
+    let new_starting_fid = get_starting_fid(newdfd, newpath_str)?;
+    let (new_dir_path, new_name) = split_path(newpath_str);
+    let new_dir_path = normalize_path(&new_dir_path);
+
+    // Walk to the new directory
+    let new_dir_fid = 0xFFFF_FFF5; // Temporary FID for new directory
+    do_walk(new_starting_fid, new_dir_fid, new_dir_path)?;
+
+    // Create the hard link using Tlink
+    let tlink = TlinkMessage::new(0, new_dir_fid, old_fid, new_name.clone());
+    match tlink.send_tlink() {
+        Ok(_) => {}
+        Err(_) => {
+            clunk(old_fid, false);
+            clunk(new_dir_fid, false);
+            return Err(Err::NoSys);
+        }
+    }
+
+    match RlinkMessage::read_response() {
+        P9Response::Success(_) => {
+            kprint!("sys_linkat: successfully created hard link");
+            clunk(old_fid, false);
+            clunk(new_dir_fid, false);
+            Ok(0)
+        }
+        P9Response::Error(rlerror) => {
+            kprint!("sys_linkat: error creating link: ecode={}", rlerror.ecode);
+            clunk(old_fid, false);
+            clunk(new_dir_fid, false);
+            Err(Err::NoSys)
+        }
+    }
 }
 
 pub fn sys_symlinkat(target: u32, newdirfd: u32, linkpath: u32) -> Result<u32, Err> {

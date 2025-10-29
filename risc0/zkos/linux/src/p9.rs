@@ -6301,6 +6301,24 @@ impl RlinkMessage {
     }
 }
 
+impl MessageError for RlinkError {
+    fn buffer_too_small() -> Self {
+        RlinkError::BufferTooSmall
+    }
+
+    fn invalid_message_type() -> Self {
+        RlinkError::InvalidMessageType
+    }
+}
+
+impl ReadableMessage for RlinkMessage {
+    type Error = RlinkError;
+
+    fn deserialize(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+        RlinkMessage::deserialize(buf)
+    }
+}
+
 /// Tfsync serialization errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TfsyncError {

@@ -445,8 +445,8 @@ pub enum Err {
     FileTooBig = -27,  // EFBIG - File too large
     NameTooLong = -36, // ENAMETOOLONG - File name too long
     NoSys = -38,       // ENOSYS - Function not implemented
+    Range = -34,       // ERANGE - Result too large / Math result not representable
     NoData = -61,      // ENODATA - No data available
-    Range = -75,       // ERANGE/E2BIG - Result too large
 }
 
 impl Err {
