@@ -870,7 +870,7 @@ pub fn handle_linux_syscall() -> ! {
         SYS_QUOTACTL => syscall4(sys_quotactl),
         SYS_QUOTACTL_FD => syscall4(sys_quotactl_fd),
         SYS_READAHEAD => syscall3(sys_readahead),
-        SYS_READLINKAT => syscall3(sys_readlinkat),
+        SYS_READLINKAT => syscall4(sys_readlinkat),
         SYS_READV => syscall3(sys_readv),
         SYS_REBOOT => syscall4(sys_reboot),
         SYS_RECVFROM => syscall6(sys_recvfrom),

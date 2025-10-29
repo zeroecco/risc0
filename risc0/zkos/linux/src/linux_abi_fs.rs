@@ -768,7 +768,10 @@ pub fn sys_chdir(filename: u32) -> Result<u32, Err> {
             }
         }
         Err(e) => {
-            kprint!("sys_chdir: error walking to directory: {:?}", e.as_errno());
+            kprint!(
+                "sys_chdir: error walking to directory: errno={}",
+                e.as_errno()
+            );
             return Err(e);
         }
     }
@@ -776,48 +779,140 @@ pub fn sys_chdir(filename: u32) -> Result<u32, Err> {
         clunk(0xFFFF_FFFD, true); // remove the old cwd fix - allow CWD clunking
     }
 
-    // Build the new path correctly
-    let new_cwd_str = if filename_str.starts_with("/") {
-        // Absolute path - use as-is
-        filename_str.to_string()
+    // Now resolve symlinks to build the canonical path
+    // Walk component-by-component from root to build canonical path
+    let mut resolved_components: Vec<String> = if filename_str.starts_with("/") {
+        vec![]
     } else {
-        // Relative path - append to current directory
-        let current_cwd = get_cwd_str();
-        if current_cwd.ends_with("/") {
-            format!("{}{}", current_cwd, filename_str)
-        } else {
-            format!("{}/{}", current_cwd, filename_str)
-        }
+        let cwd = get_cwd_str();
+        normalize_path(cwd.trim_end_matches('/'))
     };
 
-    // Resolve ..'s and .'s properly
-    let path_components = normalize_path(&new_cwd_str);
-    let mut resolved_path = Vec::new();
+    let components = normalize_path(filename_str);
 
-    for component in path_components {
+    // Process each component, resolving symlinks as we go
+    for component in components {
         if component == ".." {
-            if !resolved_path.is_empty() {
-                resolved_path.pop();
+            if !resolved_components.is_empty() {
+                resolved_components.pop();
             }
-            // If we're at root and encounter .., stay at root
         } else if component != "." && !component.is_empty() {
-            resolved_path.push(component);
+            // Check if this component is a symlink
+            // We need to walk to the parent, then Twalk to this component WITHOUT following
+            let parent_path = if resolved_components.is_empty() {
+                vec![]
+            } else {
+                resolved_components.clone()
+            };
+
+            let parent_fid = 0xFFFF_FFF9;
+            if !parent_path.is_empty() {
+                match do_walk(get_root_fid(), parent_fid, parent_path) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        // Parent doesn't exist, just add component as-is
+                        resolved_components.push(component.clone());
+                        continue;
+                    }
+                }
+            } else {
+                // Parent is root, just duplicate root fid
+                match do_walk(get_root_fid(), parent_fid, vec![]) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        resolved_components.push(component.clone());
+                        continue;
+                    }
+                }
+            }
+
+            // Now walk to just this component without following symlinks
+            let check_fid = 0xFFFF_FFF8;
+            let twalk =
+                crate::p9::TwalkMessage::new(0, parent_fid, check_fid, vec![component.clone()]);
+            match twalk.send_twalk() {
+                Ok(_) => {}
+                Err(_) => {
+                    clunk(parent_fid, false);
+                    resolved_components.push(component.clone());
+                    continue;
+                }
+            }
+
+            match crate::p9::RwalkMessage::read_response() {
+                crate::p9::P9Response::Success(rwalk) => {
+                    clunk(parent_fid, false);
+
+                    if rwalk.wqids.len() != 1 {
+                        clunk(check_fid, false);
+                        resolved_components.push(component.clone());
+                        continue;
+                    }
+
+                    // Check if it's a symlink
+                    if let Some(qid) = rwalk.wqids.first() {
+                        if qid.is_symlink() {
+                            // Read and resolve the symlink
+                            match read_symlink(check_fid) {
+                                Ok(target) => {
+                                    kprint!(
+                                        "sys_chdir: '{}' is symlink to '{}'",
+                                        component,
+                                        target
+                                    );
+                                    clunk(check_fid, false);
+
+                                    if target.starts_with('/') {
+                                        // Absolute symlink
+                                        resolved_components = normalize_path(&target);
+                                    } else {
+                                        // Relative symlink - resolve from parent directory
+                                        for target_comp in normalize_path(&target) {
+                                            if target_comp == ".." {
+                                                if !resolved_components.is_empty() {
+                                                    resolved_components.pop();
+                                                }
+                                            } else if target_comp != "." && !target_comp.is_empty()
+                                            {
+                                                resolved_components.push(target_comp);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    clunk(check_fid, false);
+                                    // If readlink fails, treat as regular file
+                                    resolved_components.push(component);
+                                }
+                            }
+                        } else {
+                            // Not a symlink
+                            clunk(check_fid, false);
+                            resolved_components.push(component);
+                        }
+                    }
+                }
+                crate::p9::P9Response::Error(_) => {
+                    clunk(parent_fid, false);
+                    // Can't walk to it, just add it
+                    resolved_components.push(component);
+                }
+            }
         }
     }
 
-    // Build final path
-    let mut final_path = if resolved_path.is_empty() {
+    // Build final canonical path
+    let mut final_path = if resolved_components.is_empty() {
         "/".to_string()
     } else {
-        format!("/{}", resolved_path.join("/"))
+        format!("/{}", resolved_components.join("/"))
     };
 
-    // Ensure it ends with / for directories
     if !final_path.ends_with("/") {
         final_path.push('/');
     }
 
-    kprint!("sys_chdir: new_cwd_str='{}'", final_path);
+    kprint!("sys_chdir: canonical path='{}'", final_path);
     set_cwd_str(final_path);
     dup_fid_to(0xFFFF_FFFC, 0xFFFF_FFFD)?;
     clunk(0xFFFF_FFFC, true); // allow CWD clunking in sys_chdir
@@ -3117,10 +3212,107 @@ pub fn sys_readahead(_fd: u32, _offset: u32, _count: u32) -> Result<u32, Err> {
     Err(Err::NoSys)
 }
 
-pub fn sys_readlinkat(_dfd: u32, _pathname: u32, _buf: u32) -> Result<u32, Err> {
-    let msg = b"sys_readlinkat not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+pub fn sys_readlinkat(dfd: u32, pathname: u32, buf: u32, bufsiz: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        return Err(Err::NoSys);
+    }
+
+    // Parse pathname
+    let pathname_buf = unsafe { core::slice::from_raw_parts(pathname as *const u8, 256) };
+    let pathname_len = pathname_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(pathname_buf.len());
+    let pathname_str = str::from_utf8(&pathname_buf[..pathname_len]).map_err(|_| Err::Inval)?;
+
+    kprint!(
+        "sys_readlinkat: dfd={}, pathname='{}', buf=0x{:x}, bufsiz={}",
+        dfd,
+        pathname_str,
+        buf,
+        bufsiz
+    );
+
+    // Walk to the symlink (without following it)
+    let symlink_fid = 0xFFFF_FFF4;
+    let starting_fid = get_starting_fid(dfd, pathname_str)?;
+    let (dir_path, file_name) = split_path(pathname_str);
+
+    // Walk to the directory
+    let dir_fid = if dir_path.is_empty() || dir_path == "." {
+        starting_fid
+    } else {
+        let dir_path = normalize_path(&dir_path);
+        do_walk(starting_fid, 0xFFFF_FFFB, dir_path)?;
+        0xFFFF_FFFB
+    };
+
+    // Walk to the symlink without following it
+    let file_path = vec![file_name];
+    let twalk = crate::p9::TwalkMessage::new(0, dir_fid, symlink_fid, file_path);
+    match twalk.send_twalk() {
+        Ok(_) => {}
+        Err(_) => {
+            if dir_fid != starting_fid {
+                clunk(dir_fid, false);
+            }
+            return Err(Err::NoSys);
+        }
+    }
+
+    match crate::p9::RwalkMessage::read_response() {
+        crate::p9::P9Response::Success(rwalk) => {
+            if rwalk.wqids.len() != 1 {
+                clunk(symlink_fid, false);
+                if dir_fid != starting_fid {
+                    clunk(dir_fid, false);
+                }
+                return Err(Err::FileNotFound);
+            }
+
+            // Check if the file is actually a symlink
+            if let Some(qid) = rwalk.wqids.first() {
+                if !qid.is_symlink() {
+                    kprint!(
+                        "sys_readlinkat: path is not a symlink (qtype={})",
+                        qid.qtype
+                    );
+                    clunk(symlink_fid, false);
+                    if dir_fid != starting_fid {
+                        clunk(dir_fid, false);
+                    }
+                    return Err(Err::Inval);
+                }
+            }
+
+            if dir_fid != starting_fid {
+                clunk(dir_fid, false);
+            }
+        }
+        crate::p9::P9Response::Error(_) => {
+            if dir_fid != starting_fid {
+                clunk(dir_fid, false);
+            }
+            return Err(Err::FileNotFound);
+        }
+    }
+
+    // Read the symlink contents
+    let symlink_target = read_symlink(symlink_fid)?;
+    clunk(symlink_fid, false);
+
+    kprint!("sys_readlinkat: symlink target = '{}'", symlink_target);
+
+    // Copy to user buffer (not null-terminated!)
+    let copy_len = symlink_target.len().min(bufsiz as usize);
+    if buf != 0 && copy_len > 0 {
+        unsafe {
+            let dest = core::slice::from_raw_parts_mut(buf as *mut u8, copy_len);
+            dest.copy_from_slice(&symlink_target.as_bytes()[..copy_len]);
+        }
+    }
+
+    Ok(copy_len as u32)
 }
 
 pub fn sys_removexattr(_pathname: u32, _name: u32) -> Result<u32, Err> {
@@ -4202,6 +4394,18 @@ pub fn sys_statx(
     // AT_EMPTY_PATH flag (0x1000) - if filename is empty, stat the fd itself
     const AT_EMPTY_PATH: u32 = 0x1000;
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
+    const AT_STATX_SYNC_TYPE: u32 = 0x6000; // Mask for sync type flags
+
+    // Valid flags for statx
+    const VALID_FLAGS_MASK: u32 =
+        AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE;
+
+    // Check for invalid flags
+    if (_flags & !VALID_FLAGS_MASK) != 0 {
+        kprint!("sys_statx: invalid flags 0x{:x}", _flags);
+        return Err(Err::Inval);
+    }
 
     if (_flags & AT_EMPTY_PATH) != 0 && _dfd < 3 {
         // FIXME this doesn't return a statx buffer, it returns 0
