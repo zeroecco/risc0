@@ -1,9 +1,8 @@
 use crate::{
     constants::{
         ASCII_TABLE_PTR, MEPC_PTR, PAGE_SIZE, REG_A0, REG_A1, REG_A2, REG_A3, REG_A4, REG_A5,
-        REG_A7, REG_SP, USER_BRK_ADDR, USER_INTERP_ADDR, USER_INTERP_BASE_ADDR, USER_MEMORY_LENGTH,
-        USER_MEMORY_START_PTR, USER_PHDR_ADDR_PTR, USER_PHDR_NUM_ADDR_PTR, USER_PHENT_SIZE,
-        USER_STACK_PTR, USER_START_PTR,
+        REG_A7, REG_SP, USER_BRK_ADDR, USER_INTERP_ADDR, USER_INTERP_BASE_ADDR, USER_PHDR_ADDR_PTR,
+        USER_PHDR_NUM_ADDR_PTR, USER_PHENT_SIZE, USER_STACK_PTR, USER_START_PTR,
     },
     host_calls::{host_argv, host_terminate},
     kernel::{get_ureg, mret, print},
@@ -13,7 +12,6 @@ use crate::{
     },
     p9::get_p9_traffic_hash,
 };
-use elf::{ElfBytes, abi::PT_INTERP, endian::LittleEndian, file::Class};
 
 use crate::kernel::set_ureg;
 use no_std_strings::{str_format, str256};
@@ -100,8 +98,6 @@ use alloc::string::ToString;
 use alloc::vec;
 #[cfg(target_arch = "riscv32")]
 use alloc::vec::Vec;
-
-use core::{alloc::Layout, ptr::NonNull};
 
 static mut MMAP_BASE: u32 = 0x94800000;
 
@@ -436,7 +432,8 @@ pub enum Err {
     FileNotFound = -2, // ENOENT
     IO = -5,           // EIO - I/O error
     BadFd = -9,        // EBADF - Bad file descriptor
-    NoMem = -12,       // ENOMEM
+    #[allow(dead_code)]
+    NoMem = -12, // ENOMEM
     Access = -13,      // EACCES - Permission denied
     Fault = -14,       // EFAULT - Bad address
     FileExists = -17,  // EEXIST
@@ -575,7 +572,7 @@ pub fn start_linux_binary(argc: u32) -> ! {
         attach_to_p9();
     }
 
-    let user_start_addr: usize = unsafe { USER_START_PTR.read_volatile() };
+    let _user_start_addr: usize = unsafe { USER_START_PTR.read_volatile() };
     let interp_base_addr = unsafe { USER_INTERP_BASE_ADDR.read_volatile() };
     let interp_addr = unsafe { USER_INTERP_ADDR.read_volatile() };
 
@@ -585,7 +582,7 @@ pub fn start_linux_binary(argc: u32) -> ! {
     // future mmap allocations (which grow downward from mmap_base)
     if interp_base_addr != 0 {
         // 0x3000 is vvar, vdso, to align with memory offsets in real rv32
-        let mmap_base = interp_base_addr as u32 - 0x3000;
+        let _mmap_base = interp_base_addr as u32 - 0x3000;
         set_mmap_base(interp_base_addr as u32);
     }
 

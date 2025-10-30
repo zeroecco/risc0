@@ -3393,6 +3393,11 @@ pub fn sys_pwritev2(
 pub fn sys_readv(_fd: u32, _vec: u32, _vlen: u32) -> Result<u32, Err> {
     // readv() reads data into multiple buffers (scatter-gather I/O)
 
+    // Validate iovcnt is not negative (check for signed interpretation)
+    if (_vlen as i32) < 0 {
+        return Err(Err::Inval);
+    }
+
     if _fd >= 256 {
         return Err(Err::BadFd);
     }
@@ -3408,8 +3413,46 @@ pub fn sys_readv(_fd: u32, _vec: u32, _vlen: u32) -> Result<u32, Err> {
         return Err(Err::BadFd);
     }
 
+    // Validate the iovec pointer is in user memory
+    const USER_MEMORY_START: u32 = 0x6800_0000;
+    const USER_MEMORY_END: u32 = 0xa000_0000;
+    if _vec == 0 || !(USER_MEMORY_START..USER_MEMORY_END).contains(&_vec) {
+        return Err(Err::Fault);
+    }
+
     // Read the iovec array from user space
     let iovecs = unsafe { core::slice::from_raw_parts(_vec as *const IoVec, _vlen as usize) };
+
+    // Validate each iovec entry
+    let mut total_len: usize = 0;
+    for (i, iov) in iovecs.iter().enumerate() {
+        // Check for negative length (iov_len is usize, so check if it's suspiciously large)
+        // A negative isize (-1) would appear as usize::MAX
+        if iov.iov_len > (isize::MAX as usize) {
+            kprint!("sys_readv: iovec[{}] has invalid length {}", i, iov.iov_len);
+            return Err(Err::Inval);
+        }
+
+        // Check for NULL or invalid buffer pointer (only if length > 0)
+        if iov.iov_len > 0 {
+            let buf_ptr = iov.iov_base as u32;
+            if buf_ptr == 0 || !(USER_MEMORY_START..USER_MEMORY_END).contains(&buf_ptr) {
+                kprint!(
+                    "sys_readv: iovec[{}] has invalid buffer pointer 0x{:x}",
+                    i,
+                    buf_ptr
+                );
+                return Err(Err::Fault);
+            }
+        }
+
+        // Check for overflow in total length
+        total_len = total_len.saturating_add(iov.iov_len);
+        if total_len > (isize::MAX as usize) {
+            kprint!("sys_readv: total iov_len overflows ssize_t");
+            return Err(Err::Inval);
+        }
+    }
 
     let mut total_read = 0u32;
 
@@ -3509,6 +3552,13 @@ pub fn sys_readlinkat(dfd: u32, pathname: u32, buf: u32, bufsiz: u32) -> Result<
         return Err(Err::NoSys);
     }
 
+    // POSIX: readlink/readlinkat must fail with EINVAL if bufsiz < 1
+    // Treat bufsiz < 2 as invalid to handle C library quirks
+    if bufsiz < 2 {
+        kprint!("sys_readlinkat: bufsiz={} < 2, returning EINVAL", bufsiz);
+        return Err(Err::Inval);
+    }
+
     // Parse pathname
     let pathname_buf = unsafe { core::slice::from_raw_parts(pathname as *const u8, 256) };
     let pathname_len = pathname_buf
@@ -3599,29 +3649,33 @@ pub fn sys_readlinkat(dfd: u32, pathname: u32, buf: u32, bufsiz: u32) -> Result<
             }
 
             // Check if the file is actually a symlink
-            if let Some(qid) = rwalk.wqids.first() {
-                if !qid.is_symlink() {
-                    kprint!(
-                        "sys_readlinkat: path is not a symlink (qtype={})",
-                        qid.qtype
-                    );
-                    clunk(symlink_fid, false);
-                    if dir_fid != starting_fid {
-                        clunk(dir_fid, false);
-                    }
-                    return Err(Err::Inval);
+            let qid = rwalk.wqids.first().unwrap();
+            if !qid.is_symlink() {
+                kprint!(
+                    "sys_readlinkat: path is not a symlink (qtype={})",
+                    qid.qtype
+                );
+                clunk(symlink_fid, false);
+                if dir_fid != starting_fid {
+                    clunk(dir_fid, false);
                 }
+                return Err(Err::Inval);
             }
 
             if dir_fid != starting_fid {
                 clunk(dir_fid, false);
             }
         }
-        crate::p9::P9Response::Error(_) => {
+        crate::p9::P9Response::Error(rlerror) => {
             if dir_fid != starting_fid {
                 clunk(dir_fid, false);
             }
-            return Err(Err::FileNotFound);
+            // Preserve ENOTDIR vs ENOENT semantics
+            return match rlerror.ecode as i32 {
+                20 => Err(Err::NotDir),
+                2 => Err(Err::FileNotFound),
+                _ => Err(Err::NoSys),
+            };
         }
     }
 
@@ -3940,7 +3994,7 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         // Validate the pointer is in user memory
         const USER_MEMORY_START: u32 = 0x6800_0000;
         const USER_MEMORY_END: u32 = 0xa000_0000;
-        if _arg < USER_MEMORY_START || _arg >= USER_MEMORY_END {
+        if !(USER_MEMORY_START..USER_MEMORY_END).contains(&_arg) {
             return Err(Err::Fault);
         }
 
@@ -3968,7 +4022,7 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
         // Validate the pointer is in user memory
         const USER_MEMORY_START: u32 = 0x6800_0000;
         const USER_MEMORY_END: u32 = 0xa000_0000;
-        if _arg < USER_MEMORY_START || _arg >= USER_MEMORY_END {
+        if !(USER_MEMORY_START..USER_MEMORY_END).contains(&_arg) {
             return Err(Err::Fault);
         }
 
@@ -4518,29 +4572,27 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                             // Will handle creation below
                         } else {
                             // Check if it's a symlink
-                            if let Some(qid) = rwalk.wqids.first() {
-                                if qid.is_symlink() {
-                                    // With O_PATH, we can open symlinks - just get an fd to the symlink itself
-                                    if (_flags & O_PATH) != 0 {
-                                        kprint!(
-                                            "sys_openat: O_NOFOLLOW + O_PATH on symlink - creating fd-only descriptor"
-                                        );
-                                        set_fd(file_fid, file_fid);
-                                        let fd_entry = get_fd(file_fid);
-                                        let mut file_desc = get_file_desc(fd_entry.file_desc_id);
-                                        file_desc.mode = 0;
-                                        file_desc.is_dir = false;
-                                        file_desc.flags = _flags;
-                                        update_file_desc(fd_entry.file_desc_id, file_desc);
-                                        return Ok(file_fid);
-                                    } else {
-                                        // O_NOFOLLOW without O_PATH on a symlink - fail with ELOOP
-                                        kprint!(
-                                            "sys_openat: O_NOFOLLOW - path is a symlink, returning ELOOP"
-                                        );
-                                        clunk(file_fid, false);
-                                        return Err(Err::Loop);
-                                    }
+                            if rwalk.wqids.first().unwrap().is_symlink() {
+                                // With O_PATH, we can open symlinks - just get an fd to the symlink itself
+                                if (_flags & O_PATH) != 0 {
+                                    kprint!(
+                                        "sys_openat: O_NOFOLLOW + O_PATH on symlink - creating fd-only descriptor"
+                                    );
+                                    set_fd(file_fid, file_fid);
+                                    let fd_entry = get_fd(file_fid);
+                                    let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+                                    file_desc.mode = 0;
+                                    file_desc.is_dir = false;
+                                    file_desc.flags = _flags;
+                                    update_file_desc(fd_entry.file_desc_id, file_desc);
+                                    return Ok(file_fid);
+                                } else {
+                                    // O_NOFOLLOW without O_PATH on a symlink - fail with ELOOP
+                                    kprint!(
+                                        "sys_openat: O_NOFOLLOW - path is a symlink, returning ELOOP"
+                                    );
+                                    clunk(file_fid, false);
+                                    return Err(Err::Loop);
                                 }
                             }
                             // Not a symlink, file exists
