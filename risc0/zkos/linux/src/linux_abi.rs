@@ -447,6 +447,7 @@ pub enum Err {
     FileTooBig = -27,  // EFBIG - File too large
     NameTooLong = -36, // ENAMETOOLONG - File name too long
     NoSys = -38,       // ENOSYS - Function not implemented
+    Loop = -40,        // ELOOP - Too many symbolic links encountered
     Range = -34,       // ERANGE - Result too large / Math result not representable
     NoData = -61,      // ENODATA - No data available
 }

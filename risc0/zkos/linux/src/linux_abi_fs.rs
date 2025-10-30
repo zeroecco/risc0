@@ -31,6 +31,14 @@ use core::str;
 
 // Filesystem-related syscalls
 
+// open() flags
+pub const O_CREAT: u32 = 0o100;
+pub const O_EXCL: u32 = 0o200;
+pub const O_TRUNC: u32 = 0o1000;
+pub const O_APPEND: u32 = 0o2000;
+pub const O_NOFOLLOW: u32 = 0o400000;
+pub const O_PATH: u32 = 0o10000000;
+
 // fcntl constants
 #[allow(dead_code)]
 pub const F_DUPFD: u32 = 0; // Duplicate file descriptor.
@@ -530,6 +538,21 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
         return Err(Err::IsDir);
     }
 
+    // Check if fd was opened with O_PATH
+    if (file_desc.flags & O_PATH) != 0 {
+        // O_PATH
+        kprint!("sys_read: fd={} opened with O_PATH, can't read", _fd);
+        return Err(Err::BadFd);
+    }
+
+    // Check if fd was opened for reading
+    let open_mode = file_desc.flags & 0x3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+    if open_mode == 1 {
+        // File opened write-only, can't read
+        kprint!("sys_read: fd={} opened write-only, can't read", _fd);
+        return Err(Err::BadFd);
+    }
+
     if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
         // read with Tread and Rread from the fid using 9p protocol and update .cursor in FILE_DESC_TABLE
         let tread = TreadMessage::new(0, file_desc.fid, file_desc.cursor, _count);
@@ -621,9 +644,24 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
         }
 
         let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+
+        // Check if fd was opened with O_PATH
+        const O_PATH: u32 = 0o10000000;
+        if (file_desc.flags & O_PATH) != 0 {
+            kprint!("do_write: fd={} opened with O_PATH, can't write", fd);
+            return Err(Err::BadFd);
+        }
+
+        // Check if fd was opened for writing
+        let open_mode = file_desc.flags & 0x3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+        if open_mode == 0 {
+            // File opened read-only, can't write
+            kprint!("do_write: fd={} opened read-only, can't write", fd);
+            return Err(Err::BadFd);
+        }
+
         if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
             // Handle O_APPEND: position at end of file before each write
-            const O_APPEND: u32 = 0o2000;
             let mut current_cursor = file_desc.cursor;
 
             if (file_desc.flags & O_APPEND) == O_APPEND {
@@ -1622,6 +1660,16 @@ pub fn sys_fchmod(fd: u32, mode: u32) -> Result<u32, Err> {
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
 
+    // Check if fd was opened with O_PATH
+    if (file_desc.flags & O_PATH) != 0 {
+        // O_PATH
+        kprint!(
+            "sys_fchmod: fd={} opened with O_PATH, operation not allowed",
+            fd
+        );
+        return Err(Err::BadFd);
+    }
+
     kprint!("sys_fchmod: fd={}, mode=0o{:o}", fd, mode);
 
     // Use Tsetattr to change file mode (permissions)
@@ -1872,6 +1920,16 @@ pub fn sys_fchown(fd: u32, user: u32, group: u32) -> Result<u32, Err> {
     }
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Check if fd was opened with O_PATH
+    if (file_desc.flags & O_PATH) != 0 {
+        // O_PATH
+        kprint!(
+            "sys_fchown: fd={} opened with O_PATH, operation not allowed",
+            fd
+        );
+        return Err(Err::BadFd);
+    }
 
     kprint!("sys_fchown: fd={}, uid={}, gid={}", fd, user, group);
 
@@ -2298,6 +2356,16 @@ pub fn sys_fgetxattr(fd: u32, name: u32, value: u32, size: u32) -> Result<u32, E
     }
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
+
+    // Check if fd was opened with O_PATH
+    if (file_desc.flags & O_PATH) != 0 {
+        // O_PATH
+        kprint!(
+            "sys_fgetxattr: fd={} opened with O_PATH, operation not allowed",
+            fd
+        );
+        return Err(Err::BadFd);
+    }
 
     // Parse the xattr name
     let name_buf = unsafe { core::slice::from_raw_parts(name as *const u8, 256) };
@@ -4271,9 +4339,8 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
         mode
     );
 
-    const O_CREAT: u32 = 0o100;
-    const O_EXCL: u32 = 0o200;
-    const O_TRUNC: u32 = 0o1000;
+    // Use top-level O_* constants
+
     let p9_flags = if (_flags & 0o3) == 0o0 {
         0
     }
@@ -4288,12 +4355,149 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
 
     let file_fid = find_free_fd()?;
 
+    // Handle O_NOFOLLOW: check if target is a symlink and fail if it is
+    if (_flags & O_NOFOLLOW) != 0 {
+        kprint!("sys_openat: O_NOFOLLOW flag set");
+
+        let starting_fid = get_starting_fid(dfd, filename_str)?;
+        let (dir_path, file_name) = split_path(filename_str);
+
+        // Walk to the directory (following symlinks in the path)
+        let dir_fid = if dir_path.is_empty() || dir_path == "." {
+            starting_fid
+        } else {
+            let dir_path = normalize_path(&dir_path);
+            match do_walk(starting_fid, 0xFFFF_FFFB, dir_path) {
+                Ok(_) => 0xFFFF_FFFB,
+                Err(e) => return Err(e),
+            }
+        };
+
+        // Walk to the final component without following symlinks
+        let file_path = vec![file_name];
+        let twalk = crate::p9::TwalkMessage::new(0, dir_fid, file_fid, file_path);
+        match twalk.send_twalk() {
+            Ok(_) => {
+                match crate::p9::RwalkMessage::read_response() {
+                    crate::p9::P9Response::Success(rwalk) => {
+                        if dir_fid != starting_fid {
+                            clunk(dir_fid, false);
+                        }
+
+                        if rwalk.wqids.len() != 1 {
+                            clunk(file_fid, false);
+                            // File doesn't exist - check if O_CREAT is set
+                            if (_flags & O_CREAT) == 0 {
+                                return Err(Err::FileNotFound);
+                            }
+                            // Will handle creation below
+                        } else {
+                            // Check if it's a symlink
+                            if let Some(qid) = rwalk.wqids.first() {
+                                if qid.is_symlink() {
+                                    kprint!(
+                                        "sys_openat: O_NOFOLLOW - path is a symlink, returning ELOOP"
+                                    );
+                                    clunk(file_fid, false);
+                                    return Err(Err::Loop);
+                                }
+                            }
+                            // Not a symlink, file exists
+                            // Check if O_PATH is set - if so, don't actually open the file
+                            if (_flags & O_PATH) != 0 {
+                                kprint!(
+                                    "sys_openat: O_NOFOLLOW + O_PATH - creating fd-only descriptor"
+                                );
+                                // For O_PATH, we don't call Tlopen - just set up the fd
+                                // The FID from Twalk is enough for fd-level operations
+                                set_fd(file_fid, file_fid);
+                                let fd_entry = get_fd(file_fid);
+                                let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+                                file_desc.mode = 0; // No actual I/O mode for O_PATH
+                                file_desc.is_dir = false;
+                                file_desc.flags = _flags; // Preserve O_PATH flag
+                                update_file_desc(fd_entry.file_desc_id, file_desc);
+                                return Ok(file_fid);
+                            }
+
+                            // Normal open
+                            kprint!(
+                                "sys_openat: O_NOFOLLOW - file exists and is not a symlink, opening"
+                            );
+
+                            let tlopen = TlopenMessage::new(0, file_fid, p9_flags);
+                            match tlopen.send_tlopen() {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    clunk(file_fid, false);
+                                    return Err(Err::IO);
+                                }
+                            }
+
+                            match RlopenMessage::read_response() {
+                                P9Response::Success(rlopen) => {
+                                    let is_directory = rlopen.qid.is_dir();
+                                    set_fd(file_fid, file_fid);
+                                    let fd_entry = get_fd(file_fid);
+                                    let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+                                    file_desc.mode = p9_flags;
+                                    file_desc.is_dir = is_directory;
+                                    file_desc.flags = _flags;
+                                    update_file_desc(fd_entry.file_desc_id, file_desc);
+                                    return Ok(file_fid);
+                                }
+                                P9Response::Error(rlerror) => {
+                                    clunk(file_fid, false);
+                                    return Ok(-(rlerror.ecode as i32) as u32);
+                                }
+                            }
+                        }
+                    }
+                    crate::p9::P9Response::Error(_) => {
+                        if dir_fid != starting_fid {
+                            clunk(dir_fid, false);
+                        }
+                        // File doesn't exist - check if O_CREAT is set
+                        if (_flags & O_CREAT) == 0 {
+                            return Err(Err::FileNotFound);
+                        }
+                        // Will handle creation below
+                    }
+                }
+            }
+            Err(_) => {
+                if dir_fid != starting_fid {
+                    clunk(dir_fid, false);
+                }
+                // File doesn't exist - check if O_CREAT is set
+                if (_flags & O_CREAT) == 0 {
+                    return Err(Err::FileNotFound);
+                }
+                // Will handle creation below
+            }
+        }
+    }
+
     if resolve_path(dfd, filename_str, file_fid).is_ok() {
         if (_flags & O_CREAT) == O_CREAT && (_flags & O_EXCL) == O_EXCL {
             kprint!("sys_openat: O_CREAT and O_EXCL flags detected, file already exists");
             return Err(Err::FileExists);
         }
         kprint!("sys_openat: file exists, flags=0x{:x}", _flags);
+
+        // Check if O_PATH is set - if so, don't actually open the file
+        if (_flags & O_PATH) != 0 {
+            kprint!("sys_openat: O_PATH - creating fd-only descriptor");
+            // For O_PATH, we don't call Tlopen - just set up the fd
+            set_fd(file_fid, file_fid);
+            let fd_entry = get_fd(file_fid);
+            let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+            file_desc.mode = 0; // No actual I/O mode for O_PATH
+            file_desc.is_dir = false;
+            file_desc.flags = _flags; // Preserve O_PATH flag
+            update_file_desc(fd_entry.file_desc_id, file_desc);
+            return Ok(file_fid);
+        }
 
         let tlopen = TlopenMessage::new(0, file_fid, p9_flags);
 
