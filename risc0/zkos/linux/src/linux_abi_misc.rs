@@ -716,9 +716,10 @@ pub fn sys_msgsnd(_msqid: u32, _msgp: u32, _msgsz: u32, _msgflg: u32) -> Result<
 }
 
 pub fn sys_msync(_addr: u32, _len: u32, _flags: u32) -> Result<u32, Err> {
-    let msg = b"sys_msync not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    // msync() synchronizes a mapped memory region with the underlying file
+    // In a zkVM environment without real virtual memory management,
+    // this is a no-op that always succeeds
+    Ok(0)
 }
 
 pub fn sys_munlock(_addr: u32, _len: u32) -> Result<u32, Err> {

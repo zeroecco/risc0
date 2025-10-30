@@ -8,7 +8,8 @@ use crate::{
     host_calls::{host_argv, host_terminate},
     kernel::{get_ureg, mret, print},
     linux_abi_fs::{
-        attach_to_p9, get_p9_enabled, init_fs, read_file_to_user_memory, set_p9_enabled, sys_statx,
+        attach_to_p9, get_fd, get_file_desc, get_p9_enabled, init_fs, read_file_to_user_memory,
+        set_p9_enabled, sys_statx,
     },
     p9::get_p9_traffic_hash,
 };
@@ -436,6 +437,7 @@ pub enum Err {
     IO = -5,           // EIO - I/O error
     BadFd = -9,        // EBADF - Bad file descriptor
     NoMem = -12,       // ENOMEM
+    Access = -13,      // EACCES - Permission denied
     Fault = -14,       // EFAULT - Bad address
     FileExists = -17,  // EEXIST
     NotDir = -20,      // ENOTDIR - Not a directory
@@ -1076,13 +1078,87 @@ fn sys_mmap(
 ) -> Result<u32, Err> {
     let _fd = fd as i32;
     kprint!("sys_mmap(0x{_addr:08x}, {len}, {_prot}, 0x{_flags:08x}, {_fd}, {pgoffset})");
-    // let msg = str_format!(
-    //     str256,
-    //     "sys_mmap(0x{_addr:08x}, {len}, {_prot}, 0x{_flags:08x}, {_fd}, {_offset})"
-    // );
-    // print(&msg);
+
+    // Check file descriptor validity for file-backed mappings first
+    // (EBADF has priority over EINVAL for length/flags)
+    // Note: fd=-1 is only valid if MAP_ANONYMOUS flag is set
+    let has_anon_flag = (_flags & 0x20) == 0x20; // MAP_ANONYMOUS
+    let is_file_backed = !has_anon_flag; // File-backed if no MAP_ANONYMOUS flag
+
+    if is_file_backed {
+        // For file-backed mappings, validate fd first (before length/flags)
+        // fd=-1 without MAP_ANONYMOUS is invalid
+        if _fd == -1 || fd >= 256 {
+            kprint!(
+                "sys_mmap: EBADF - invalid fd {} for file-backed mapping",
+                _fd
+            );
+            return Err(Err::BadFd);
+        }
+        let fd_entry = get_fd(fd);
+        if fd_entry.file_desc_id == 0xFF {
+            kprint!("sys_mmap: EBADF - fd {} is not open", fd);
+            return Err(Err::BadFd);
+        }
+    }
+
+    // Validate length
     if len == 0 {
         return Err(Err::Inval);
+    }
+
+    // Validate flags - must contain one of MAP_PRIVATE, MAP_SHARED, or MAP_SHARED_VALIDATE
+    const MAP_PRIVATE: u32 = 0x02;
+    const MAP_SHARED: u32 = 0x01;
+    const MAP_SHARED_VALIDATE: u32 = 0x03;
+
+    let has_valid_sharing = (_flags & MAP_PRIVATE) != 0
+        || (_flags & MAP_SHARED) != 0
+        || (_flags & MAP_SHARED_VALIDATE) != 0;
+
+    if !has_valid_sharing {
+        kprint!("sys_mmap: invalid flags - missing MAP_PRIVATE/MAP_SHARED");
+        return Err(Err::Inval);
+    }
+
+    // Check file descriptor permissions for file-backed mappings
+    if is_file_backed {
+        // For file-backed mappings, check fd permissions
+        if fd < 256 {
+            let fd_entry = get_fd(fd);
+            // We already checked fd is valid above, so this should always succeed
+            if fd_entry.file_desc_id != 0xFF {
+                let file_desc = get_file_desc(fd_entry.file_desc_id);
+                let open_mode = file_desc.flags & 0x3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+
+                kprint!(
+                    "sys_mmap: checking permissions - open_mode={}, prot=0x{:x}, flags=0x{:x}",
+                    open_mode,
+                    _prot,
+                    _flags
+                );
+
+                // Check if fd has read permission when PROT_READ or PROT_WRITE is requested
+                // (even PROT_WRITE requires read permission for private mappings)
+                if ((_prot & 0x1) != 0 || (_prot & 0x2) != 0) && open_mode == 1 {
+                    // File opened write-only but read/write access requested
+                    kprint!(
+                        "sys_mmap: EACCES - fd opened write-only but PROT_READ/WRITE requested"
+                    );
+                    return Err(Err::Access);
+                }
+
+                // Check if fd has write permission when PROT_WRITE with MAP_SHARED is requested
+                if (_prot & 0x2) != 0 && (_flags & MAP_SHARED) != 0 && open_mode == 0 {
+                    // PROT_WRITE=0x2
+                    // File opened read-only but write with MAP_SHARED is requested
+                    kprint!(
+                        "sys_mmap: EACCES - fd opened read-only but PROT_WRITE+MAP_SHARED requested"
+                    );
+                    return Err(Err::Access);
+                }
+            }
+        }
     }
 
     kprint!("user_brk_start = {:08x}", unsafe {
@@ -1105,22 +1181,46 @@ fn sys_mmap(
 
     let offset = pgoffset as u64 * PAGE_SIZE as u64;
     const MAP_FIXED: u32 = 0x10;
-    const MAP_ANONYMOUS: u32 = 0x20;
+    // MAP_ANONYMOUS already defined above
     if _flags & MAP_FIXED == MAP_FIXED {
         kprint!("sys_mmap: MAP_FIXED is set");
     }
 
-    // XXX this should be kernel stack max not 0xc000_0000
-    if _addr != 0 && _addr + len > 0xc000_0000 {
-        kprint!(
-            "sys_mmap: addr outside mmap space = {:08x}, returning Inval",
-            _addr
-        );
-        return Err(Err::Inval);
+    // Check for address overflow and invalid high memory regions
+    // Reject any attempt to map into kernel space (>= 0xC0000000)
+    if _addr != 0 {
+        // Check if starting address is in kernel space
+        if _addr >= 0xc000_0000 {
+            kprint!(
+                "sys_mmap: address in kernel space - addr=0x{:08x}, returning EINVAL",
+                _addr
+            );
+            return Err(Err::Inval);
+        }
+        // Check for overflow when adding length to address
+        let end_addr = _addr.wrapping_add(len);
+        if end_addr < _addr {
+            // Overflow occurred - address wraps around
+            kprint!(
+                "sys_mmap: address overflow - addr=0x{:08x} len={}, returning EINVAL",
+                _addr,
+                len
+            );
+            return Err(Err::Inval);
+        }
+        // Check if address range extends into kernel space
+        if end_addr > 0xc000_0000 {
+            kprint!(
+                "sys_mmap: addr outside mmap space - end=0x{:08x}, returning EINVAL",
+                end_addr
+            );
+            return Err(Err::Inval);
+        }
     }
 
-    // Check for anonymous mapping (either fd == -1 OR MAP_ANONYMOUS flag is set)
-    let is_anonymous = _fd == -1 || (_flags & MAP_ANONYMOUS == MAP_ANONYMOUS);
+    // Use the is_file_backed variable we computed earlier
+    // is_file_backed = true means not anonymous
+    let is_anonymous = !is_file_backed;
 
     if is_anonymous && _flags & MAP_FIXED != MAP_FIXED {
         let mmap_base = get_mmap_base();
@@ -1218,18 +1318,26 @@ fn sys_mmap(
 
 /// https://man7.org/linux/man-pages/man2/mmap.2.html
 fn sys_munmap(addr: u32, _len: u32) -> Result<u32, Err> {
-    let ptr = addr as *mut u8;
+    // munmap() unmaps the specified address range
+    // In a zkVM environment without real virtual memory management,
+    // we implement this as a validated no-op
 
-    // let msg = str_format!(str256, "sys_munmap({ptr:?}, {_len})");
-    // print(&msg);
+    kprint!("sys_munmap: addr=0x{:08x}, len={}", addr, _len);
 
-    kprint!("sys_munmap: ptr = {:?}", ptr);
-    if ptr.is_null() {
-        kprint!("sys_munmap: ptr is null");
+    // Validate address is not NULL
+    if addr == 0 {
+        kprint!("sys_munmap: addr is NULL");
         return Err(Err::Inval);
     }
 
-    Err(Err::NoSys)
+    // Validate address is page-aligned
+    if addr % PAGE_SIZE as u32 != 0 {
+        kprint!("sys_munmap: addr is not page-aligned");
+        return Err(Err::Inval);
+    }
+
+    // munmap succeeds as a no-op in zkVM
+    Ok(0)
 }
 
 /// https://man7.org/linux/man-pages/man2/ioctl.2.html

@@ -2997,14 +2997,14 @@ pub fn sys_llseek(
         return Err(Err::NoSys);
     }
 
-    if _fd >= 256 {
+    // Validate whence first (before checking fd for proper error priority)
+    if whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END {
+        kprint!("sys_llseek: invalid whence={}", whence);
         return Err(Err::Inval);
     }
 
-    if whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END {
-        let msg = b"sys_llseek: invalid whence";
-        host_log(msg.as_ptr(), msg.len());
-        return Err(Err::NoSys);
+    if _fd >= 256 {
+        return Err(Err::BadFd);
     }
 
     let fd_entry = get_fd(_fd);
@@ -4060,7 +4060,12 @@ fn do_walk(
                 rlerror.tag,
                 rlerror.ecode
             );
-            Err(Err::NoSys)
+            // Map common 9P error codes to proper Linux errno
+            match rlerror.ecode {
+                2 => Err(Err::FileNotFound), // ENOENT
+                20 => Err(Err::NotDir),      // ENOTDIR
+                _ => Err(Err::NoSys),
+            }
         }
     }
 }
@@ -4373,7 +4378,8 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
         let (dir_path, file_name) = split_path(filename_str);
         resolve_path(dfd, &dir_path, file_fid)?;
 
-        let p9_mode = mode & 0o777; // Basic permission bits
+        // Preserve permission bits including sticky bit, setuid, setgid
+        let p9_mode = mode & 0o7777; // Permission bits + special bits (sticky, setuid, setgid)
         // Create the file using Tlcreate
         let tlcreate =
             TlcreateMessage::new(0, file_fid, file_name.to_string(), p9_flags, p9_mode, 0); // flags=p9_flags, mode=p9_mode, gid=0
