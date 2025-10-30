@@ -2564,6 +2564,79 @@ pub fn sys_fremovexattr(_fd: u32, _name: u32) -> Result<u32, Err> {
     Err(Err::NoSys)
 }
 
+#[allow(dead_code)]
+pub fn sys_truncate64(pathname: u32, length: u32) -> Result<u32, Err> {
+    if !get_p9_enabled() {
+        let msg = b"sys_truncate64: p9 is not enabled";
+        host_log(msg.as_ptr(), msg.len());
+        return Err(Err::NoSys);
+    }
+
+    // Parse pathname
+    let pathname_buf = unsafe { core::slice::from_raw_parts(pathname as *const u8, 256) };
+    let pathname_len = pathname_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(pathname_buf.len());
+    let pathname_str = str::from_utf8(&pathname_buf[..pathname_len]).map_err(|_| Err::Inval)?;
+
+    kprint!(
+        "sys_truncate64: pathname='{}', length={}",
+        pathname_str,
+        length
+    );
+
+    // Walk to the file
+    let file_fid = 0xFFFF_FFF4;
+    resolve_path(AT_FDCWD as u32, pathname_str, file_fid)?;
+
+    // Create Tsetattr message for truncate operation
+    let valid = P9SetattrMask::Size as u32;
+    let new_size = length as u64;
+
+    let tsetattr = TsetattrMessage::new(
+        0,        // tag
+        file_fid, // fid
+        valid,    // valid mask (only Size)
+        0,        // mode (not changing)
+        0,        // uid (not changing)
+        0,        // gid (not changing)
+        new_size, // size (the new file size)
+        0,        // atime_sec (not changing)
+        0,        // atime_nsec (not changing)
+        0,        // mtime_sec (not changing)
+        0,        // mtime_nsec (not changing)
+    );
+
+    match tsetattr.send_tsetattr() {
+        Ok(bytes_written) => {
+            kprint!("sys_truncate64: sent {} bytes for Tsetattr", bytes_written);
+        }
+        Err(e) => {
+            kprint!("sys_truncate64: error sending Tsetattr: {:?}", e);
+            clunk(file_fid, false);
+            return Err(Err::NoSys);
+        }
+    }
+
+    match RsetattrMessage::read_response() {
+        P9Response::Success(rsetattr) => {
+            kprint!("sys_truncate64: rsetattr = {:?}", rsetattr);
+            clunk(file_fid, false);
+            Ok(0)
+        }
+        P9Response::Error(rlerror) => {
+            kprint!(
+                "sys_truncate64: received Rlerror for Rsetattr: tag={}, ecode={}",
+                rlerror.tag,
+                rlerror.ecode
+            );
+            clunk(file_fid, false);
+            Ok(-(rlerror.ecode as i32) as u32)
+        }
+    }
+}
+
 pub fn sys_ftruncate64(fd: u32, length: u32) -> Result<u32, Err> {
     if !get_p9_enabled() {
         let msg = b"sys_ftruncate64: p9 is not enabled";

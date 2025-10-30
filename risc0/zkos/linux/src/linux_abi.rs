@@ -44,7 +44,7 @@ use crate::linux_abi_fs::{
     sys_openat, sys_openat2, sys_pread64, sys_preadv, sys_preadv2, sys_pwrite64, sys_pwritev,
     sys_pwritev2, sys_read, sys_readahead, sys_readlinkat, sys_readv, sys_removexattr,
     sys_removexattrat, sys_renameat2, sys_sendfile64, sys_setxattr, sys_setxattrat, sys_statfs64,
-    sys_symlinkat, sys_unlinkat, sys_utimensat_time64, sys_write, sys_writev,
+    sys_symlinkat, sys_truncate64, sys_unlinkat, sys_utimensat_time64, sys_write, sys_writev,
 };
 
 // Import miscellaneous syscalls from the misc module
@@ -84,8 +84,8 @@ use crate::linux_abi_misc::{
     sys_signalfd4, sys_splice, sys_statmount, sys_sync, sys_sync_file_range, sys_syncfs,
     sys_sysinfo, sys_syslog, sys_tee, sys_tgkill, sys_timer_create, sys_timer_delete,
     sys_timer_getoverrun, sys_timer_gettime64, sys_timer_settime64, sys_timerfd_create,
-    sys_timerfd_gettime64, sys_timerfd_settime64, sys_times, sys_truncate64, sys_umask, sys_uname,
-    sys_unshare, sys_userfaultfd, sys_vmsplice, sys_waitid,
+    sys_timerfd_gettime64, sys_timerfd_settime64, sys_times, sys_umask, sys_uname, sys_unshare,
+    sys_userfaultfd, sys_vmsplice, sys_waitid,
 };
 
 static mut BRK: u32 = 0u32;

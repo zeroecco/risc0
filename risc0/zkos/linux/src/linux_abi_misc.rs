@@ -1469,11 +1469,12 @@ pub fn sys_times(_tbuf: u32) -> Result<u32, Err> {
     Err(Err::NoSys)
 }
 
-pub fn sys_truncate64(_path: u32, _length: u32) -> Result<u32, Err> {
-    let msg = b"sys_truncate64 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
-}
+// sys_truncate64 is now implemented in linux_abi_fs.rs
+// pub fn sys_truncate64(_path: u32, _length: u32) -> Result<u32, Err> {
+//     let msg = b"sys_truncate64 not implemented";
+//     host_log(msg.as_ptr(), msg.len());
+//     Err(Err::NoSys)
+// }
 
 pub fn sys_umask(_mask: u32) -> Result<u32, Err> {
     let msg = b"sys_umask not implemented";
