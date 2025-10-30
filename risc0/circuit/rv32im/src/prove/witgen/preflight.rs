@@ -21,7 +21,7 @@ use num_traits::FromPrimitive as _;
 use risc0_binfmt::{ByteAddr, WordAddr};
 use risc0_circuit_rv32im_sys::{RawMemoryTransaction, RawPreflightCycle};
 use risc0_core::scope;
-use risc0_zkp::core::digest::{Digest, DIGEST_WORDS};
+use risc0_zkp::core::digest::{DIGEST_WORDS, Digest};
 
 use crate::{
     EcallKind,

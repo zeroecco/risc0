@@ -29,20 +29,20 @@ use std::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use derive_more::Debug;
 use risc0_zkp::{
     core::{
-        digest::{Digest, DIGEST_WORDS},
-        hash::poseidon2::{poseidon2_mix, CELLS},
+        digest::{DIGEST_WORDS, Digest},
+        hash::poseidon2::{CELLS, poseidon2_mix},
     },
-    field::{baby_bear::BabyBearElem, Elem as _},
+    field::{Elem as _, baby_bear::BabyBearElem},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    PAGE_BYTES, PAGE_WORDS, Program, WORD_SIZE,
     addr::{ByteAddr, WordAddr},
-    Program, PAGE_BYTES, PAGE_WORDS, WORD_SIZE,
 };
 
 const MEMORY_BYTES: u64 = 1 << 32;

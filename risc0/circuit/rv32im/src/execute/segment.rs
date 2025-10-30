@@ -22,8 +22,8 @@ use risc0_zkp::core::digest::Digest;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    MAX_INSN_CYCLES, MAX_INSN_CYCLES_LOWER_PO2, TerminateState,
     execute::{CycleLimit, Executor, ExecutorResult, RV32IM_V2_CIRCUIT_VERSION},
-    TerminateState, MAX_INSN_CYCLES, MAX_INSN_CYCLES_LOWER_PO2,
 };
 
 use super::{Syscall, SyscallContext};
