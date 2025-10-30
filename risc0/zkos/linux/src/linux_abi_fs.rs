@@ -538,21 +538,6 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
         return Err(Err::IsDir);
     }
 
-    // Check if fd was opened with O_PATH
-    if (file_desc.flags & O_PATH) != 0 {
-        // O_PATH
-        kprint!("sys_read: fd={} opened with O_PATH, can't read", _fd);
-        return Err(Err::BadFd);
-    }
-
-    // Check if fd was opened for reading
-    let open_mode = file_desc.flags & 0x3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
-    if open_mode == 1 {
-        // File opened write-only, can't read
-        kprint!("sys_read: fd={} opened write-only, can't read", _fd);
-        return Err(Err::BadFd);
-    }
-
     if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
         // read with Tread and Rread from the fid using 9p protocol and update .cursor in FILE_DESC_TABLE
         let tread = TreadMessage::new(0, file_desc.fid, file_desc.cursor, _count);
@@ -644,22 +629,6 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
         }
 
         let mut file_desc = get_file_desc(fd_entry.file_desc_id);
-
-        // Check if fd was opened with O_PATH
-        const O_PATH: u32 = 0o10000000;
-        if (file_desc.flags & O_PATH) != 0 {
-            kprint!("do_write: fd={} opened with O_PATH, can't write", fd);
-            return Err(Err::BadFd);
-        }
-
-        // Check if fd was opened for writing
-        let open_mode = file_desc.flags & 0x3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
-        if open_mode == 0 {
-            // File opened read-only, can't write
-            kprint!("do_write: fd={} opened read-only, can't write", fd);
-            return Err(Err::BadFd);
-        }
-
         if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
             // Handle O_APPEND: position at end of file before each write
             let mut current_cursor = file_desc.cursor;
@@ -1660,16 +1629,6 @@ pub fn sys_fchmod(fd: u32, mode: u32) -> Result<u32, Err> {
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
 
-    // Check if fd was opened with O_PATH
-    if (file_desc.flags & O_PATH) != 0 {
-        // O_PATH
-        kprint!(
-            "sys_fchmod: fd={} opened with O_PATH, operation not allowed",
-            fd
-        );
-        return Err(Err::BadFd);
-    }
-
     kprint!("sys_fchmod: fd={}, mode=0o{:o}", fd, mode);
 
     // Use Tsetattr to change file mode (permissions)
@@ -1920,16 +1879,6 @@ pub fn sys_fchown(fd: u32, user: u32, group: u32) -> Result<u32, Err> {
     }
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
-
-    // Check if fd was opened with O_PATH
-    if (file_desc.flags & O_PATH) != 0 {
-        // O_PATH
-        kprint!(
-            "sys_fchown: fd={} opened with O_PATH, operation not allowed",
-            fd
-        );
-        return Err(Err::BadFd);
-    }
 
     kprint!("sys_fchown: fd={}, uid={}, gid={}", fd, user, group);
 
@@ -2356,16 +2305,6 @@ pub fn sys_fgetxattr(fd: u32, name: u32, value: u32, size: u32) -> Result<u32, E
     }
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
-
-    // Check if fd was opened with O_PATH
-    if (file_desc.flags & O_PATH) != 0 {
-        // O_PATH
-        kprint!(
-            "sys_fgetxattr: fd={} opened with O_PATH, operation not allowed",
-            fd
-        );
-        return Err(Err::BadFd);
-    }
 
     // Parse the xattr name
     let name_buf = unsafe { core::slice::from_raw_parts(name as *const u8, 256) };
@@ -3308,9 +3247,43 @@ pub fn sys_openat2(_dfd: u32, _filename: u32, _how: u32) -> Result<u32, Err> {
 }
 
 pub fn sys_preadv(_fd: u32, _vec: u32, _vlen: u32, _pos_low: u32) -> Result<u32, Err> {
-    let msg = b"sys_preadv not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    if _fd >= 256 {
+        return Err(Err::Inval);
+    }
+
+    kprint!(
+        "sys_preadv: fd={}, vec=0x{:08x}, vlen={}, pos={}",
+        _fd,
+        _vec,
+        _vlen,
+        _pos_low
+    );
+
+    // preadv reads from a specific offset without changing the file position
+    // Similar to pread64, but with scatter-gather I/O
+
+    let fd_entry = get_fd(_fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+    let current_pos = file_desc.cursor;
+
+    // Seek to requested offset
+    let mut updated_desc = file_desc;
+    updated_desc.cursor = _pos_low as u64;
+    update_file_desc(fd_entry.file_desc_id, updated_desc);
+
+    // Do the readv
+    let result = sys_readv(_fd, _vec, _vlen);
+
+    // Restore original file position
+    let mut restored_desc = get_file_desc(fd_entry.file_desc_id);
+    restored_desc.cursor = current_pos;
+    update_file_desc(fd_entry.file_desc_id, restored_desc);
+
+    result
 }
 
 pub fn sys_preadv2(
@@ -3326,15 +3299,83 @@ pub fn sys_preadv2(
 }
 
 pub fn sys_pwrite64(_fd: u32, _buf: u32, _count: u32, _pos: u32) -> Result<u32, Err> {
-    let msg = b"sys_pwrite64 not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    if _fd >= 256 {
+        return Err(Err::Inval);
+    }
+
+    kprint!(
+        "sys_pwrite64: fd={}, buf=0x{:08x}, count={}, pos={}",
+        _fd,
+        _buf,
+        _count,
+        _pos
+    );
+
+    // pwrite64 writes to a specific offset without changing the file position
+    // We need to: save current position, seek to offset, write, restore position
+
+    let fd_entry = get_fd(_fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+    let current_pos = file_desc.cursor;
+
+    // Seek to requested offset
+    let mut updated_desc = file_desc;
+    updated_desc.cursor = _pos as u64;
+    update_file_desc(fd_entry.file_desc_id, updated_desc);
+
+    // Do the write
+    let result = sys_write(_fd, _buf, _count);
+
+    // Restore original file position
+    let mut restored_desc = get_file_desc(fd_entry.file_desc_id);
+    restored_desc.cursor = current_pos;
+    update_file_desc(fd_entry.file_desc_id, restored_desc);
+
+    result
 }
 
 pub fn sys_pwritev(_fd: u32, _vec: u32, _vlen: u32, _pos_low: u32) -> Result<u32, Err> {
-    let msg = b"sys_pwritev not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    if _fd >= 256 {
+        return Err(Err::Inval);
+    }
+
+    kprint!(
+        "sys_pwritev: fd={}, vec=0x{:08x}, vlen={}, pos={}",
+        _fd,
+        _vec,
+        _vlen,
+        _pos_low
+    );
+
+    // pwritev writes from a specific offset without changing the file position
+    // Similar to pwrite64, but with scatter-gather I/O
+
+    let fd_entry = get_fd(_fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    let file_desc = get_file_desc(fd_entry.file_desc_id);
+    let current_pos = file_desc.cursor;
+
+    // Seek to requested offset
+    let mut updated_desc = file_desc;
+    updated_desc.cursor = _pos_low as u64;
+    update_file_desc(fd_entry.file_desc_id, updated_desc);
+
+    // Do the writev
+    let result = sys_writev(_fd, _vec, _vlen);
+
+    // Restore original file position
+    let mut restored_desc = get_file_desc(fd_entry.file_desc_id);
+    restored_desc.cursor = current_pos;
+    update_file_desc(fd_entry.file_desc_id, restored_desc);
+
+    result
 }
 
 pub fn sys_pwritev2(
@@ -3350,9 +3391,60 @@ pub fn sys_pwritev2(
 }
 
 pub fn sys_readv(_fd: u32, _vec: u32, _vlen: u32) -> Result<u32, Err> {
-    let msg = b"sys_readv not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
+    // readv() reads data into multiple buffers (scatter-gather I/O)
+
+    if _fd >= 256 {
+        return Err(Err::BadFd);
+    }
+
+    if _vlen == 0 {
+        return Ok(0);
+    }
+
+    kprint!("sys_readv: fd={}, vec=0x{:08x}, vlen={}", _fd, _vec, _vlen);
+
+    let fd_entry = get_fd(_fd);
+    if fd_entry.file_desc_id == 0xFF {
+        return Err(Err::BadFd);
+    }
+
+    // Read the iovec array from user space
+    let iovecs = unsafe { core::slice::from_raw_parts(_vec as *const IoVec, _vlen as usize) };
+
+    let mut total_read = 0u32;
+
+    // Read into each buffer in sequence
+    for (i, iov) in iovecs.iter().enumerate() {
+        if iov.iov_len == 0 {
+            continue;
+        }
+
+        kprint!(
+            "sys_readv: reading into iovec[{}] - base=0x{:08x}, len={}",
+            i,
+            iov.iov_base as u32,
+            iov.iov_len
+        );
+
+        match sys_read(_fd, iov.iov_base as u32, iov.iov_len as u32) {
+            Ok(bytes_read) => {
+                total_read += bytes_read;
+                // If we read less than requested, we've hit EOF
+                if bytes_read < iov.iov_len as u32 {
+                    break;
+                }
+            }
+            Err(e) => {
+                // If we've already read some data, return that
+                if total_read > 0 {
+                    return Ok(total_read);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(total_read)
 }
 
 pub fn sys_ioctl(fd: u32, _cmd: u32, arg: u32) -> Result<u32, Err> {
@@ -3432,6 +3524,42 @@ pub fn sys_readlinkat(dfd: u32, pathname: u32, buf: u32, bufsiz: u32) -> Result<
         buf,
         bufsiz
     );
+
+    // Handle empty pathname - operate on the fd itself
+    if pathname_str.is_empty() {
+        kprint!(
+            "sys_readlinkat: empty pathname, reading symlink from fd {}",
+            dfd
+        );
+
+        if dfd >= 256 {
+            return Err(Err::BadFd);
+        }
+
+        let fd_entry = get_fd(dfd);
+        if fd_entry.file_desc_id == 0xFF {
+            return Err(Err::BadFd);
+        }
+
+        let file_desc = get_file_desc(fd_entry.file_desc_id);
+        let symlink_fid = file_desc.fid;
+
+        // Read the symlink contents directly from the fd's FID
+        let symlink_target = read_symlink(symlink_fid)?;
+
+        kprint!("sys_readlinkat: symlink target = '{}'", symlink_target);
+
+        // Copy to user buffer (not null-terminated!)
+        let copy_len = symlink_target.len().min(bufsiz as usize);
+        if buf != 0 && copy_len > 0 {
+            unsafe {
+                let dest = core::slice::from_raw_parts_mut(buf as *mut u8, copy_len);
+                dest.copy_from_slice(&symlink_target.as_bytes()[..copy_len]);
+            }
+        }
+
+        return Ok(copy_len as u32);
+    }
 
     // Walk to the symlink (without following it)
     let symlink_fid = 0xFFFF_FFF4;
@@ -3748,7 +3876,6 @@ pub fn sys_fcntl64(_fd: u32, _cmd: u32, _arg: u32) -> Result<u32, Err> {
     } else if _cmd == F_SETFL {
         // Set file status flags (only certain flags can be set: O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT)
         // O_RDONLY, O_WRONLY, O_RDWR, and other open-time flags cannot be changed
-        const O_APPEND: u32 = 0o2000; // 0x400
         const O_NONBLOCK: u32 = 0o4000; // 0x800 (also O_NDELAY)
         const O_ASYNC: u32 = 0o20000; // 0x2000
         const O_DIRECT: u32 = 0o40000; // 0x4000
@@ -4322,11 +4449,9 @@ fn resolve_path(dfd: u32, filename_str: &str, into_fid: u32) -> Result<u32, Err>
     let mut file_path = dir_path.clone();
     file_path.push(file_name.clone());
 
-    if do_walk(starting_fid, into_fid, file_path).is_ok() {
-        Ok(0)
-    } else {
-        Err(Err::FileNotFound)
-    }
+    // Propagate the actual error from do_walk
+    do_walk(starting_fid, into_fid, file_path)?;
+    Ok(0)
 }
 
 fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32, Err> {
@@ -4395,11 +4520,27 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                             // Check if it's a symlink
                             if let Some(qid) = rwalk.wqids.first() {
                                 if qid.is_symlink() {
-                                    kprint!(
-                                        "sys_openat: O_NOFOLLOW - path is a symlink, returning ELOOP"
-                                    );
-                                    clunk(file_fid, false);
-                                    return Err(Err::Loop);
+                                    // With O_PATH, we can open symlinks - just get an fd to the symlink itself
+                                    if (_flags & O_PATH) != 0 {
+                                        kprint!(
+                                            "sys_openat: O_NOFOLLOW + O_PATH on symlink - creating fd-only descriptor"
+                                        );
+                                        set_fd(file_fid, file_fid);
+                                        let fd_entry = get_fd(file_fid);
+                                        let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+                                        file_desc.mode = 0;
+                                        file_desc.is_dir = false;
+                                        file_desc.flags = _flags;
+                                        update_file_desc(fd_entry.file_desc_id, file_desc);
+                                        return Ok(file_fid);
+                                    } else {
+                                        // O_NOFOLLOW without O_PATH on a symlink - fail with ELOOP
+                                        kprint!(
+                                            "sys_openat: O_NOFOLLOW - path is a symlink, returning ELOOP"
+                                        );
+                                        clunk(file_fid, false);
+                                        return Err(Err::Loop);
+                                    }
                                 }
                             }
                             // Not a symlink, file exists
@@ -4409,13 +4550,12 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
                                     "sys_openat: O_NOFOLLOW + O_PATH - creating fd-only descriptor"
                                 );
                                 // For O_PATH, we don't call Tlopen - just set up the fd
-                                // The FID from Twalk is enough for fd-level operations
                                 set_fd(file_fid, file_fid);
                                 let fd_entry = get_fd(file_fid);
                                 let mut file_desc = get_file_desc(fd_entry.file_desc_id);
-                                file_desc.mode = 0; // No actual I/O mode for O_PATH
+                                file_desc.mode = 0;
                                 file_desc.is_dir = false;
-                                file_desc.flags = _flags; // Preserve O_PATH flag
+                                file_desc.flags = _flags;
                                 update_file_desc(fd_entry.file_desc_id, file_desc);
                                 return Ok(file_fid);
                             }
@@ -4478,7 +4618,8 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
         }
     }
 
-    if resolve_path(dfd, filename_str, file_fid).is_ok() {
+    let path_result = resolve_path(dfd, filename_str, file_fid);
+    if path_result.is_ok() {
         if (_flags & O_CREAT) == O_CREAT && (_flags & O_EXCL) == O_EXCL {
             kprint!("sys_openat: O_CREAT and O_EXCL flags detected, file already exists");
             return Err(Err::FileExists);
@@ -4492,9 +4633,9 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
             set_fd(file_fid, file_fid);
             let fd_entry = get_fd(file_fid);
             let mut file_desc = get_file_desc(fd_entry.file_desc_id);
-            file_desc.mode = 0; // No actual I/O mode for O_PATH
+            file_desc.mode = 0;
             file_desc.is_dir = false;
-            file_desc.flags = _flags; // Preserve O_PATH flag
+            file_desc.flags = _flags;
             update_file_desc(fd_entry.file_desc_id, file_desc);
             return Ok(file_fid);
         }
@@ -4625,8 +4766,22 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
             }
         }
     } else {
-        kprint!("sys_openat: file not found");
-        Err(Err::FileNotFound)
+        // File doesn't exist and O_CREAT is not set
+        // Return the actual error from resolve_path (could be ENOTDIR, EBADF, ENOENT, etc.)
+        match path_result {
+            Ok(_) => {
+                // This shouldn't happen as we already handled the Ok case above
+                kprint!("sys_openat: unexpected state - path_result was Ok");
+                Err(Err::FileNotFound)
+            }
+            Err(e) => {
+                kprint!(
+                    "sys_openat: path resolution failed with error {:?}",
+                    e as i32
+                );
+                Err(e)
+            }
+        }
     }
 }
 
