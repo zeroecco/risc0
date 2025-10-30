@@ -2765,6 +2765,22 @@ pub fn sys_linkat(
         return Err(Err::NoSys);
     }
 
+    // Check for NULL pointers
+    if oldname == 0 {
+        kprint!("sys_linkat: oldname is NULL");
+        return Err(Err::Fault);
+    }
+    if newname == 0 {
+        kprint!("sys_linkat: newname is NULL");
+        return Err(Err::Fault);
+    }
+
+    // Check if addresses are in user memory range
+    if oldname >= 0xC0000000 || newname >= 0xC0000000 {
+        kprint!("sys_linkat: address out of user memory range");
+        return Err(Err::Fault);
+    }
+
     // Parse old path
     let oldpath = unsafe { core::slice::from_raw_parts(oldname as *const u8, 256) };
     let oldpath_len = oldpath
@@ -2780,6 +2796,26 @@ pub fn sys_linkat(
         .position(|&b| b == 0)
         .unwrap_or(newpath.len());
     let newpath_str = str::from_utf8(&newpath[..newpath_len]).map_err(|_| Err::Inval)?;
+
+    // Check for empty paths
+    if oldpath_str.is_empty() {
+        kprint!("sys_linkat: oldpath is empty");
+        return Err(Err::FileNotFound);
+    }
+    if newpath_str.is_empty() {
+        kprint!("sys_linkat: newpath is empty");
+        return Err(Err::FileNotFound);
+    }
+
+    // Check for pathname too long
+    if oldpath_str.len() > 255 {
+        kprint!("sys_linkat: oldpath too long ({})", oldpath_str.len());
+        return Err(Err::NameTooLong);
+    }
+    if newpath_str.len() > 255 {
+        kprint!("sys_linkat: newpath too long ({})", newpath_str.len());
+        return Err(Err::NameTooLong);
+    }
 
     kprint!(
         "sys_linkat: old='{}' new='{}', flags=0x{:x}",
@@ -2799,7 +2835,13 @@ pub fn sys_linkat(
 
     // Walk to the new directory
     let new_dir_fid = 0xFFFF_FFF5; // Temporary FID for new directory
-    do_walk(new_starting_fid, new_dir_fid, new_dir_path)?;
+    match do_walk(new_starting_fid, new_dir_fid, new_dir_path) {
+        Ok(_) => {}
+        Err(e) => {
+            clunk(old_fid, false);
+            return Err(e);
+        }
+    }
 
     // Create the hard link using Tlink
     let tlink = TlinkMessage::new(0, new_dir_fid, old_fid, new_name.clone());
@@ -2808,7 +2850,7 @@ pub fn sys_linkat(
         Err(_) => {
             clunk(old_fid, false);
             clunk(new_dir_fid, false);
-            return Err(Err::NoSys);
+            return Err(Err::IO);
         }
     }
 
@@ -2823,7 +2865,9 @@ pub fn sys_linkat(
             kprint!("sys_linkat: error creating link: ecode={}", rlerror.ecode);
             clunk(old_fid, false);
             clunk(new_dir_fid, false);
-            Err(Err::NoSys)
+            // Map 9P error codes to Linux errno
+            // Return the error code as a negative errno value
+            Ok(-(rlerror.ecode as i32) as u32)
         }
     }
 }
