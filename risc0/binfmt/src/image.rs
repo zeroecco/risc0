@@ -113,7 +113,6 @@ pub struct MemoryImage {
     // #[debug("{:#010x?}", digests.keys())]
     pub digests: BTreeMap<u32, Digest>,
 
-    // TODO(victor) Would it be better overall if this were a HashSet?
     #[debug("{} entries", dirty.len())]
     dirty: BTreeSet<u32>,
 }
@@ -240,11 +239,11 @@ impl MemoryImage {
 
     /// Get a digest, fails if unavailable
     pub fn get_digest(&mut self, digest_idx: u32) -> Result<&Digest> {
-        // Expand if needed
-        self.expand_if_zero(digest_idx);
         if self.dirty.contains(&digest_idx) {
             bail!("Digest marked as dirty: {digest_idx}");
         }
+        // Expand if needed
+        self.expand_if_zero(digest_idx);
         self.digests
             .get(&digest_idx)
             .ok_or_else(|| anyhow!("Unavailable digest: {digest_idx}"))
@@ -299,12 +298,13 @@ impl MemoryImage {
         // Compute the depth in the tree of this node
         let mut depth = digest_idx.ilog2() as usize;
         // Go up until we hit a valid node or get past the root
+        // TODO(victor/perf): This does not correctly take into account dirty digests.
         while !self.digests.contains_key(&digest_idx) && digest_idx > 0 {
             digest_idx /= 2;
             depth -= 1;
         }
         if digest_idx == 0 {
-            false
+            unreachable!("corrupted memory image; contains no valid digests")
         } else {
             self.digests[&digest_idx] == ZERO_CACHE.digests[depth]
         }
