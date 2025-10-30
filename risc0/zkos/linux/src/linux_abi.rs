@@ -447,6 +447,7 @@ pub enum Err {
     Loop = -40,        // ELOOP - Too many symbolic links encountered
     Range = -34,       // ERANGE - Result too large / Math result not representable
     NoData = -61,      // ENODATA - No data available
+    OpNotSupp = -95,   // EOPNOTSUPP - Operation not supported
 }
 
 impl Err {
@@ -1042,18 +1043,55 @@ fn syscall6<F: Fn(u32, u32, u32, u32, u32, u32) -> Result<u32, Err>>(inner: F) {
 /// https://elixir.bootlin.com/linux/v5.15.5/source/mm/nommu.c#L381
 fn sys_brk(addr: u32) -> Result<u32, Err> {
     kprint!("sys_brk: addr = {:08x}", addr);
-    let ret = unsafe {
-        let original_brk = USER_BRK_ADDR.read_volatile() as u32;
-        if addr > original_brk {
-            BRK = addr;
-        }
-        BRK
-    };
-    kprint!("sys_brk: ret = {:08x}", ret);
-    // let msg = str_format!(str256, "sys_brk(0x{addr:08x}) -> 0x{ret:08x}");
-    // print(&msg);
 
-    Ok(ret)
+    unsafe {
+        // Get current BRK value
+        let current_brk = core::ptr::addr_of!(BRK).read_volatile();
+
+        // Initialize BRK to the original break address if it's not set
+        if current_brk == 0 {
+            let original_brk = USER_BRK_ADDR.read_volatile() as u32;
+            core::ptr::addr_of_mut!(BRK).write_volatile(original_brk);
+            kprint!("sys_brk: initialized BRK to {:08x}", original_brk);
+
+            // If addr is 0, return the initialized break
+            if addr == 0 {
+                return Ok(original_brk);
+            }
+        } else {
+            // If addr is 0, return the current break
+            if addr == 0 {
+                kprint!("sys_brk: returning current BRK = {:08x}", current_brk);
+                return Ok(current_brk);
+            }
+        }
+
+        let original_brk = USER_BRK_ADDR.read_volatile() as u32;
+        let current_brk = core::ptr::addr_of!(BRK).read_volatile();
+
+        // Validate the new address
+        // Don't allow setting it below the original break
+        if addr < original_brk {
+            kprint!(
+                "sys_brk: addr {:08x} < original_brk {:08x}, returning current BRK",
+                addr,
+                original_brk
+            );
+            return Ok(current_brk);
+        }
+
+        // Don't allow setting it too high (arbitrary limit to prevent abuse)
+        const MAX_BRK_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
+        if addr > original_brk + MAX_BRK_SIZE {
+            kprint!("sys_brk: addr {:08x} too high, returning current BRK", addr);
+            return Ok(current_brk);
+        }
+
+        // Update the break
+        core::ptr::addr_of_mut!(BRK).write_volatile(addr);
+        kprint!("sys_brk: updated BRK to {:08x}", addr);
+        Ok(addr)
+    }
 }
 
 fn align_up(addr: usize, align: usize) -> usize {

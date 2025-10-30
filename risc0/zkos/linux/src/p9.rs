@@ -4125,6 +4125,24 @@ pub enum RrenameError {
     InternalError,
 }
 
+impl MessageError for RrenameError {
+    fn buffer_too_small() -> Self {
+        RrenameError::BufferTooSmall
+    }
+
+    fn invalid_message_type() -> Self {
+        RrenameError::InvalidMessageType
+    }
+}
+
+impl ReadableMessage for RrenameMessage {
+    type Error = RrenameError;
+
+    fn deserialize(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+        Self::deserialize(buf)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreadlinkError {
     BufferTooSmall,

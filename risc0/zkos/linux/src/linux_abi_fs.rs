@@ -287,7 +287,51 @@ pub fn sys_unlinkat(dfd: u32, pathname: u32, flag: u32) -> Result<u32, Err> {
         flag
     );
 
-    resolve_path(dfd, filename_str, 0xFFFF_FFFE)?;
+    // For unlink, we must NOT follow symlinks - we want to remove the symlink itself, not its target
+    // Use direct Twalk instead of resolve_path
+    let starting_fid = get_starting_fid(dfd, filename_str)?;
+    let (dir_path, file_name) = split_path(filename_str);
+
+    // Walk to the directory (following symlinks in the path)
+    let dir_fid = if dir_path.is_empty() || dir_path == "." {
+        starting_fid
+    } else {
+        let dir_path = normalize_path(&dir_path);
+        do_walk(starting_fid, 0xFFFF_FFFB, dir_path)?;
+        0xFFFF_FFFB
+    };
+
+    // Walk to the file itself WITHOUT following symlinks
+    let file_path = vec![file_name];
+    let twalk = crate::p9::TwalkMessage::new(0, dir_fid, 0xFFFF_FFFE, file_path);
+    match twalk.send_twalk() {
+        Ok(_) => match crate::p9::RwalkMessage::read_response() {
+            crate::p9::P9Response::Success(rwalk) => {
+                if dir_fid != starting_fid {
+                    clunk(dir_fid, false);
+                }
+
+                if rwalk.wqids.is_empty() {
+                    clunk(0xFFFF_FFFE, false);
+                    return Err(Err::FileNotFound);
+                }
+            }
+            crate::p9::P9Response::Error(_) => {
+                if dir_fid != starting_fid {
+                    clunk(dir_fid, false);
+                }
+                return Err(Err::FileNotFound);
+            }
+        },
+        Err(_) => {
+            if dir_fid != starting_fid {
+                clunk(dir_fid, false);
+            }
+            return Err(Err::FileNotFound);
+        }
+    }
+
+    // Now 0xFFFF_FFFE points to the file/symlink itself (not its target)
     let tremove = TremoveMessage::new(0, 0xFFFF_FFFE);
     match tremove.send_tremove() {
         Ok(bytes_written) => {
@@ -2964,7 +3008,7 @@ pub fn sys_symlinkat(target: u32, newdirfd: u32, linkpath: u32) -> Result<u32, E
                 rlerror.ecode
             );
             clunk(0xFFFF_FFFE, false);
-            Err(Err::NoSys)
+            Ok(-(rlerror.ecode as i32) as u32)
         }
     }
 }
@@ -3759,6 +3803,40 @@ pub fn sys_renameat2(
         _flags
     );
 
+    // Define rename flags
+    const RENAME_NOREPLACE: u32 = 1 << 0; // Don't overwrite newpath
+    const RENAME_EXCHANGE: u32 = 1 << 1; // Exchange oldpath and newpath atomically
+    const RENAME_WHITEOUT: u32 = 1 << 2; // Whiteout source (for overlay filesystems)
+
+    // Validate flag combinations
+    // RENAME_NOREPLACE and RENAME_EXCHANGE are mutually exclusive
+    if (_flags & RENAME_NOREPLACE) != 0 && (_flags & RENAME_EXCHANGE) != 0 {
+        kprint!("sys_renameat2: RENAME_NOREPLACE and RENAME_EXCHANGE both set");
+        return Err(Err::Inval);
+    }
+
+    // RENAME_WHITEOUT and RENAME_EXCHANGE are mutually exclusive
+    if (_flags & RENAME_WHITEOUT) != 0 && (_flags & RENAME_EXCHANGE) != 0 {
+        kprint!("sys_renameat2: RENAME_WHITEOUT and RENAME_EXCHANGE both set");
+        return Err(Err::Inval);
+    }
+
+    // We don't support RENAME_WHITEOUT (it's for overlay filesystems)
+    if (_flags & RENAME_WHITEOUT) != 0 {
+        kprint!("sys_renameat2: RENAME_WHITEOUT not supported");
+        return Err(Err::OpNotSupp);
+    }
+
+    // Validate no unknown flags
+    const KNOWN_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
+    if (_flags & !KNOWN_FLAGS) != 0 {
+        kprint!(
+            "sys_renameat2: unknown flags: 0x{:x}",
+            _flags & !KNOWN_FLAGS
+        );
+        return Err(Err::Inval);
+    }
+
     // Split paths into directory and filename components
     // Use temp fids that don't conflict with CWD (0xFFFF_FFFD)
     let old_starting_fid = get_starting_fid(_olddirfd, oldpath_str)?;
@@ -3771,9 +3849,246 @@ pub fn sys_renameat2(
     let new_dir_path = normalize_path(&new_dir_path);
     do_walk(new_starting_fid, 0xFFFF_FFFB, new_dir_path)?;
 
-    // Send Trenameat message
-    let trenameat =
-        TrenameatMessage::new(0, 0xFFFF_FFFE, old_name.to_string(), 0xFFFF_FFFB, new_name);
+    // Handle RENAME_NOREPLACE: fail if newpath exists
+    if (_flags & RENAME_NOREPLACE) != 0 {
+        // Try to walk to the new file to see if it exists
+        let new_file_fid = 0xFFFF_FFF9;
+        let new_file_path = vec![new_name.clone()];
+        let twalk = crate::p9::TwalkMessage::new(0, 0xFFFF_FFFB, new_file_fid, new_file_path);
+        match twalk.send_twalk() {
+            Ok(_) => {
+                match crate::p9::RwalkMessage::read_response() {
+                    crate::p9::P9Response::Success(rwalk) => {
+                        if !rwalk.wqids.is_empty() {
+                            // File exists, fail with EEXIST
+                            kprint!("sys_renameat2: RENAME_NOREPLACE and newpath exists");
+                            clunk(new_file_fid, false);
+                            clunk(0xFFFF_FFFE, false);
+                            clunk(0xFFFF_FFFB, false);
+                            return Err(Err::FileExists);
+                        }
+                        clunk(new_file_fid, false);
+                    }
+                    crate::p9::P9Response::Error(_) => {
+                        // File doesn't exist, continue with rename
+                    }
+                }
+            }
+            Err(_) => {
+                // File doesn't exist, continue with rename
+            }
+        }
+    }
+
+    // Handle RENAME_EXCHANGE: atomically exchange oldpath and newpath
+    if (_flags & RENAME_EXCHANGE) != 0 {
+        // For RENAME_EXCHANGE, both files must exist
+        // Check if newpath exists
+        let new_file_fid = 0xFFFF_FFF9;
+        let new_file_path = vec![new_name.clone()];
+        let twalk = crate::p9::TwalkMessage::new(0, 0xFFFF_FFFB, new_file_fid, new_file_path);
+        match twalk.send_twalk() {
+            Ok(_) => {
+                match crate::p9::RwalkMessage::read_response() {
+                    crate::p9::P9Response::Success(rwalk) => {
+                        if rwalk.wqids.is_empty() {
+                            // newpath doesn't exist, fail with ENOENT
+                            kprint!("sys_renameat2: RENAME_EXCHANGE but newpath doesn't exist");
+                            clunk(new_file_fid, false);
+                            clunk(0xFFFF_FFFE, false);
+                            clunk(0xFFFF_FFFB, false);
+                            return Err(Err::FileNotFound);
+                        }
+                        clunk(new_file_fid, false);
+                    }
+                    crate::p9::P9Response::Error(_) => {
+                        // newpath doesn't exist, fail with ENOENT
+                        kprint!("sys_renameat2: RENAME_EXCHANGE but newpath doesn't exist");
+                        clunk(0xFFFF_FFFE, false);
+                        clunk(0xFFFF_FFFB, false);
+                        return Err(Err::FileNotFound);
+                    }
+                }
+            }
+            Err(_) => {
+                // newpath doesn't exist, fail with ENOENT
+                kprint!("sys_renameat2: RENAME_EXCHANGE but newpath doesn't exist");
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::FileNotFound);
+            }
+        }
+
+        // For RENAME_EXCHANGE, we need to do a three-way swap:
+        // 1. Rename oldpath to temp
+        // 2. Rename newpath to oldpath
+        // 3. Rename temp to newpath
+        // This is complex and not atomic in 9P, so we'll return EOPNOTSUPP for now
+        // unless the 9P server supports it natively
+        kprint!("sys_renameat2: RENAME_EXCHANGE - attempting via temp file swap");
+
+        // Create a temporary name
+        let temp_name = format!(".tmp_rename_{}", old_name);
+
+        // Walk to oldfile
+        let old_file_fid = 0xFFFF_FFF7;
+        let old_file_path = vec![old_name.clone()];
+        let twalk_old = crate::p9::TwalkMessage::new(0, 0xFFFF_FFFE, old_file_fid, old_file_path);
+        match twalk_old.send_twalk() {
+            Ok(_) => {
+                if let crate::p9::P9Response::Error(_) = crate::p9::RwalkMessage::read_response() {
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Err(Err::FileNotFound);
+                }
+            }
+            Err(_) => {
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::FileNotFound);
+            }
+        }
+
+        // Walk to newfile
+        let new_file_fid2 = 0xFFFF_FFF6;
+        let new_file_path2 = vec![new_name.clone()];
+        let twalk_new = crate::p9::TwalkMessage::new(0, 0xFFFF_FFFB, new_file_fid2, new_file_path2);
+        match twalk_new.send_twalk() {
+            Ok(_) => {
+                if let crate::p9::P9Response::Error(_) = crate::p9::RwalkMessage::read_response() {
+                    clunk(old_file_fid, false);
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Err(Err::FileNotFound);
+                }
+            }
+            Err(_) => {
+                clunk(old_file_fid, false);
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::FileNotFound);
+            }
+        }
+
+        // Step 1: Rename oldfile to temp (in old directory)
+        let trename1 =
+            crate::p9::TrenameMessage::new(0, old_file_fid, 0xFFFF_FFFE, temp_name.clone());
+        match trename1.send_trename() {
+            Ok(_) => match crate::p9::RrenameMessage::read_response() {
+                P9Response::Success(_) => {
+                    kprint!("sys_renameat2: step 1 complete (old->temp)");
+                }
+                P9Response::Error(rlerror) => {
+                    clunk(old_file_fid, false);
+                    clunk(new_file_fid2, false);
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Ok(-(rlerror.ecode as i32) as u32);
+                }
+            },
+            Err(_) => {
+                clunk(old_file_fid, false);
+                clunk(new_file_fid2, false);
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::IO);
+            }
+        }
+
+        // Step 2: Rename newfile to oldname (in old directory)
+        let trename2 =
+            crate::p9::TrenameMessage::new(0, new_file_fid2, 0xFFFF_FFFE, old_name.to_string());
+        match trename2.send_trename() {
+            Ok(_) => match crate::p9::RrenameMessage::read_response() {
+                P9Response::Success(_) => {
+                    kprint!("sys_renameat2: step 2 complete (new->old)");
+                }
+                P9Response::Error(rlerror) => {
+                    // Rollback not implemented for simplicity
+                    clunk(old_file_fid, false);
+                    clunk(new_file_fid2, false);
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Ok(-(rlerror.ecode as i32) as u32);
+                }
+            },
+            Err(_) => {
+                clunk(old_file_fid, false);
+                clunk(new_file_fid2, false);
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::IO);
+            }
+        }
+
+        // Step 3: Rename temp to newname (in new directory)
+        // Need to walk to temp in old directory first
+        let temp_fid = 0xFFFF_FFF5;
+        let temp_path = vec![temp_name.clone()];
+        let twalk_temp = crate::p9::TwalkMessage::new(0, 0xFFFF_FFFE, temp_fid, temp_path);
+        match twalk_temp.send_twalk() {
+            Ok(_) => {
+                if let crate::p9::P9Response::Error(_) = crate::p9::RwalkMessage::read_response() {
+                    clunk(old_file_fid, false);
+                    clunk(new_file_fid2, false);
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Err(Err::FileNotFound);
+                }
+            }
+            Err(_) => {
+                clunk(old_file_fid, false);
+                clunk(new_file_fid2, false);
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::FileNotFound);
+            }
+        }
+
+        let trename3 =
+            crate::p9::TrenameMessage::new(0, temp_fid, 0xFFFF_FFFB, new_name.to_string());
+        match trename3.send_trename() {
+            Ok(_) => match crate::p9::RrenameMessage::read_response() {
+                P9Response::Success(_) => {
+                    kprint!("sys_renameat2: RENAME_EXCHANGE complete");
+                    clunk(old_file_fid, false);
+                    clunk(new_file_fid2, false);
+                    clunk(temp_fid, false);
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Ok(0);
+                }
+                P9Response::Error(rlerror) => {
+                    kprint!("sys_renameat2: RENAME_EXCHANGE failed at step 3");
+                    clunk(old_file_fid, false);
+                    clunk(new_file_fid2, false);
+                    clunk(temp_fid, false);
+                    clunk(0xFFFF_FFFE, false);
+                    clunk(0xFFFF_FFFB, false);
+                    return Ok(-(rlerror.ecode as i32) as u32);
+                }
+            },
+            Err(_) => {
+                kprint!("sys_renameat2: RENAME_EXCHANGE failed at step 3");
+                clunk(old_file_fid, false);
+                clunk(new_file_fid2, false);
+                clunk(temp_fid, false);
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Err(Err::IO);
+            }
+        }
+    }
+
+    // Normal rename (flags=0 or RENAME_NOREPLACE with non-existing target)
+    // Try Trenameat first (9P2000.L extension)
+    let trenameat = TrenameatMessage::new(
+        0,
+        0xFFFF_FFFE,
+        old_name.to_string(),
+        0xFFFF_FFFB,
+        new_name.clone(),
+    );
 
     match trenameat.send_trenameat() {
         Ok(_) => {
@@ -3790,16 +4105,77 @@ pub fn sys_renameat2(
     // Read response
     match RrenameatMessage::read_response() {
         P9Response::Success(_rrenameat) => {
-            kprint!("sys_renameat2: rename successful");
+            kprint!("sys_renameat2: Trenameat successful");
             clunk(0xFFFF_FFFE, false);
             clunk(0xFFFF_FFFB, false);
-            Ok(0)
+            return Ok(0);
         }
         P9Response::Error(rlerror) => {
-            kprint!("sys_renameat2: received Rlerror: ecode={}", rlerror.ecode);
-            clunk(0xFFFF_FFFE, false);
-            clunk(0xFFFF_FFFB, false);
-            Ok(-(rlerror.ecode as i32) as u32)
+            // If Trenameat is not supported, fall back to Trename
+            if rlerror.ecode == 95 {
+                // EOPNOTSUPP
+                kprint!("sys_renameat2: Trenameat not supported, trying Trename");
+
+                // For Trename, we need to walk to the file being renamed
+                let file_fid = 0xFFFF_FFF8;
+                let file_path = vec![old_name.clone()];
+                let twalk = crate::p9::TwalkMessage::new(0, 0xFFFF_FFFE, file_fid, file_path);
+                match twalk.send_twalk() {
+                    Ok(_) => match crate::p9::RwalkMessage::read_response() {
+                        crate::p9::P9Response::Success(rwalk) => {
+                            if rwalk.wqids.is_empty() {
+                                clunk(file_fid, false);
+                                clunk(0xFFFF_FFFE, false);
+                                clunk(0xFFFF_FFFB, false);
+                                return Err(Err::FileNotFound);
+                            }
+                        }
+                        crate::p9::P9Response::Error(_) => {
+                            clunk(0xFFFF_FFFE, false);
+                            clunk(0xFFFF_FFFB, false);
+                            return Err(Err::FileNotFound);
+                        }
+                    },
+                    Err(_) => {
+                        clunk(0xFFFF_FFFE, false);
+                        clunk(0xFFFF_FFFB, false);
+                        return Err(Err::FileNotFound);
+                    }
+                }
+
+                // Now use Trename: rename file_fid to newpath in newdirfid
+                let trename =
+                    crate::p9::TrenameMessage::new(0, file_fid, 0xFFFF_FFFB, new_name.to_string());
+                match trename.send_trename() {
+                    Ok(_) => match crate::p9::RrenameMessage::read_response() {
+                        crate::p9::P9Response::Success(_) => {
+                            kprint!("sys_renameat2: Trename successful");
+                            clunk(file_fid, false);
+                            clunk(0xFFFF_FFFE, false);
+                            clunk(0xFFFF_FFFB, false);
+                            return Ok(0);
+                        }
+                        crate::p9::P9Response::Error(rlerror2) => {
+                            kprint!("sys_renameat2: Trename failed: ecode={}", rlerror2.ecode);
+                            clunk(file_fid, false);
+                            clunk(0xFFFF_FFFE, false);
+                            clunk(0xFFFF_FFFB, false);
+                            return Ok(-(rlerror2.ecode as i32) as u32);
+                        }
+                    },
+                    Err(_) => {
+                        clunk(file_fid, false);
+                        clunk(0xFFFF_FFFE, false);
+                        clunk(0xFFFF_FFFB, false);
+                        return Err(Err::IO);
+                    }
+                }
+            } else {
+                kprint!("sys_renameat2: received Rlerror: ecode={}", rlerror.ecode);
+                clunk(0xFFFF_FFFE, false);
+                clunk(0xFFFF_FFFB, false);
+                return Ok(-(rlerror.ecode as i32) as u32);
+            }
         }
     }
 }
