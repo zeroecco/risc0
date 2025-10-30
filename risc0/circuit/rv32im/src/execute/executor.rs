@@ -111,7 +111,7 @@ pub enum CycleLimit {
 /// Can be used to construct a [Segment] starting from an an initial memory state and processing
 /// each segment update.
 #[non_exhaustive]
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub struct SegmentUpdate {
     /// Partial image containing pages that were written to in the segment.
     update_partial_image: WorkingImage,
@@ -119,8 +119,10 @@ pub struct SegmentUpdate {
     access_page_indexes: BTreeSet<u32>,
 
     /// Record of what is read by the guest across all syscalls.
+    #[debug("{}", read_record.len())]
     read_record: Vec<Vec<u8>>,
     /// Record of writen to the host across all syscalls.
+    #[debug("{}", write_record.len())]
     write_record: Vec<u32>,
 
     /// Input digest available to the guest via the input ecall.
@@ -129,15 +131,14 @@ pub struct SegmentUpdate {
     ///
     /// Will only be `Some` if `terminate_state` is `Some`.
     output_digest: Option<Digest>,
-    /// Values set upon termination of execution, indication the termination type.
+    /// Value set upon termination of execution, indicating the termination type.
     terminate_state: Option<TerminateState>,
 
-    /// Count of "user cycles", which represents the cycles directly associated with instructions
-    /// executed by the user guest program. Does not include paging costs.
+    /// Count of "user cycles", the cycles directly associated with instructions executed by the
+    /// user guest program, before suspend in this segment. Does not include paging costs.
     user_cycles: u32,
     /// Count of cycles associated with memory paging (i.e. page-in and page-out operations).
     pager_cycles: u32,
-    /// Cycle number when the machine reached the halt or split state.
     segment_threshold: u32,
     /// Power-of-two for the segment size required to prove this segment.
     po2: u32,
@@ -146,7 +147,7 @@ pub struct SegmentUpdate {
     /// Gloablly unique nonce used within the proof of verifiable work system.
     povw_nonce: Option<PovwNonce>,
 
-    // TODO(victor/perf): Remove this field from this struct. It may be useful though to indicate
+    // TODO(victor/perf): Remove this field from this struct? It may be useful though to indicate
     // that an error condition occurred when sending this last segment. Or just have the executor
     // thread handle that condition itself by constructing the Segment and dumping it.
     dump_path: Option<std::ffi::OsString>,

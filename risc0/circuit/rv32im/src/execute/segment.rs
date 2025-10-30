@@ -33,38 +33,38 @@ use super::{Syscall, SyscallContext};
 pub struct Segment {
     /// Initial sparse memory state for the segment
     ///
-    /// It is not madated that this have all digests up to date, as long as the dirty digests are
+    /// It is not mandated that this have all digests up to date, as long as the dirty digests are
     /// marked. A process that receives a Segment must call [MemoryImage::update_digests] before
     /// any operation that accesses the digest values.
     pub partial_image: MemoryImage,
 
-    // Digest written to the input slot of the globals and claim.
-    pub input_digest: Digest,
-    // Digest written to the output slot of the globals and claim.
-    pub output_digest: Option<Digest>,
-
-    pub terminate_state: Option<TerminateState>,
-
     /// Recorded host->guest IO, one entry per read
     #[debug("{}", read_record.len())]
     pub read_record: Vec<Vec<u8>>,
-
     /// Recorded rlen of guest->host IO, one entry per write
     #[debug("{}", write_record.len())]
     pub write_record: Vec<u32>,
 
-    /// Cycle at which we suspend
+    /// Digest written to the input slot of the globals and claim.
+    pub input_digest: Digest,
+    /// Digest written to the output slot of the globals and claim.
+    pub output_digest: Option<Digest>,
+    /// Value set upon termination of execution, indicating the termination type.
+    pub terminate_state: Option<TerminateState>,
+
+    // NOTE: This is the same as SegmentUpdate::user_cycles.
+    /// Count of "user cycles", the cycles directly associated with instructions executed by the
+    /// user guest program, before suspend in this segment. Does not include paging costs.
     pub suspend_cycle: u32,
-
-    /// Total paging cycles
+    /// Count of cycles associated with memory paging (i.e. page-in and page-out operations).
     pub paging_cycles: u32,
-
     pub segment_threshold: u32,
 
+    /// Power-of-two for the segment size required to prove this segment.
     pub po2: u32,
-
+    /// Index of the segment in the session.
     pub index: u64,
-
+    /// Gloablly unique nonce used within the proof of verifiable work system.
     pub povw_nonce: Option<PovwNonce>,
 }
 
