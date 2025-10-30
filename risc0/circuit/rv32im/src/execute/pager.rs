@@ -198,6 +198,16 @@ impl PageTable {
         self.table[index as usize] = (value + 1) as u32
     }
 
+    // TODO(victor/perf): Up to 10% of total execution time is spent in this re-allocation right
+    // now. Can we avoid this? Two ideas are
+    // A) Maintain the PageTable and page cache (Vec<Page>) across splits. Intead only clear the
+    // page states. This would require changing how a page miss is detected and may require
+    // introducing a size bound on the page cache (and thus some form of cache eviction).
+    // B) Change the detection of invalid entries here to use a version number and simply increment
+    // the version number on clear. With NUM_PAGES = 2^22, this given 10 bits for a version number.
+    // When the version increments to overflow the 10 bits, a true clear would happen to reset all
+    // page indices to zero. This would change the work on each get slightly (mask and compare
+    // instead of checked sub).
     fn clear(&mut self) {
         // You would think its faster to reuse the memory, but filling it with zeros is slower
         // than just allocating a new piece of zeroed memory.
