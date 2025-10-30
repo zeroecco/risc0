@@ -238,7 +238,7 @@ fn zero_page() -> &'static Page {
     ZERO_PAGE.get_or_init(Page::default)
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub(crate) struct WorkingImage {
     #[debug(skip)]
     pub(crate) pages: BTreeMap<u32, Page>,

@@ -66,6 +66,8 @@ pub struct Executor<'a, 'b, S: Syscall> {
     trace: Vec<Rc<RefCell<dyn TraceCallback + 'b>>>,
     cycles: SessionCycles,
     ecall_metrics: EnumMap<EcallKind, EcallMetric>,
+    /// Ring buffer storing the most recent instructions executed. When the exec_debug feature is
+    /// enabled, if the executor encounter an error, it dumps these recent instructions.
     ring: AllocRingBuffer<(ByteAddr, InsnKind, DecodedInstruction)>,
     povw_job_id: Option<PovwJobId>,
     circuit_version: u32,
@@ -103,24 +105,50 @@ pub enum CycleLimit {
     None,
 }
 
-struct CreateSegmentRequest {
-    // Partial image containing pages that were written to in the segment.
+/// Update message sent to the segment callback on each split.
+///
+/// Contains the updated memory pages as well as the pages accessed during the associated segment.
+/// Can be used to construct a [Segment] starting from an an initial memory state and processing
+/// each segment update.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct SegmentUpdate {
+    /// Partial image containing pages that were written to in the segment.
     update_partial_image: WorkingImage,
-    // Indices of all pages that were accessed in the segment.
+    /// Indices of all pages that were accessed in the segment.
     access_page_indexes: BTreeSet<u32>,
 
-    input_digest: Digest,
-    output_digest: Option<Digest>,
+    /// Record of what is read by the guest across all syscalls.
     read_record: Vec<Vec<u8>>,
+    /// Record of writen to the host across all syscalls.
     write_record: Vec<u32>,
-    user_cycles: u32,
-    pager_cycles: u32,
+
+    /// Input digest available to the guest via the input ecall.
+    input_digest: Digest,
+    /// Output digest set by the guest upon termination.
+    ///
+    /// Will only be `Some` if `terminate_state` is `Some`.
+    output_digest: Option<Digest>,
+    /// Values set upon termination of execution, indication the termination type.
     terminate_state: Option<TerminateState>,
+
+    /// Count of "user cycles", which represents the cycles directly associated with instructions
+    /// executed by the user guest program. Does not include paging costs.
+    user_cycles: u32,
+    /// Count of cycles associated with memory paging (i.e. page-in and page-out operations).
+    pager_cycles: u32,
+    /// Cycle number when the machine reached the halt or split state.
     segment_threshold: u32,
+    /// Power-of-two for the segment size required to prove this segment.
     po2: u32,
+    /// Index of the segment in the session.
     index: u64,
+    /// Gloablly unique nonce used within the proof of verifiable work system.
     povw_nonce: Option<PovwNonce>,
 
+    // TODO(victor/perf): Remove this field from this struct. It may be useful though to indicate
+    // that an error condition occurred when sending this last segment. Or just have the executor
+    // thread handle that condition itself by constructing the Segment and dumping it.
     dump_path: Option<std::ffi::OsString>,
 }
 
@@ -129,7 +157,7 @@ const MAX_OUTSTANDING_SEGMENTS: usize = 5;
 
 fn create_segments(
     initial_image: MemoryImage,
-    recv: std::sync::mpsc::Receiver<CreateSegmentRequest>,
+    recv: std::sync::mpsc::Receiver<SegmentUpdate>,
     mut callback: impl FnMut(Segment) -> Result<()>,
 ) -> Result<(Digest, Digest, MemoryImage)> {
     let mut existing_image = initial_image;
@@ -334,7 +362,7 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
     /// fails to receive the segment request (e.g. the thread has died).
     fn split_segment(
         &mut self,
-        commit_sender: &SyncSender<CreateSegmentRequest>,
+        commit_sender: &SyncSender<SegmentUpdate>,
         segment_callback_thread: &mut Option<ScopedJoinHandle<'_, Result<impl Debug>>>,
         segment_po2: usize,
         segment_threshold: u32,
@@ -348,7 +376,7 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
 
         let partial_image = self.pager.commit();
 
-        let req = CreateSegmentRequest {
+        let req = SegmentUpdate {
             update_partial_image: partial_image,
             access_page_indexes: self.pager.page_indexes(),
             input_digest: self.input_digest,
@@ -405,7 +433,7 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
 
     fn dump_segment<RetT>(
         &mut self,
-        commit_sender: SyncSender<CreateSegmentRequest>,
+        commit_sender: SyncSender<SegmentUpdate>,
         segment_callback_thread: ScopedJoinHandle<'_, Result<RetT>>,
         po2: usize,
         segment_threshold: u32,
@@ -419,7 +447,7 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
 
             let partial_image = self.pager.commit();
 
-            let req = CreateSegmentRequest {
+            let req = SegmentUpdate {
                 update_partial_image: partial_image,
                 access_page_indexes: self.pager.page_indexes(),
                 input_digest: self.input_digest,
