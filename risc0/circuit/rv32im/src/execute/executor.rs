@@ -152,6 +152,58 @@ pub struct SegmentUpdate {
     dump_path: Option<std::ffi::OsString>,
 }
 
+impl SegmentUpdate {
+    /// Applies the update to the given [MemoryImage].
+    ///
+    /// Provided that the given memory image represents that state at the start of the segment, the
+    /// memory image will be updated to the state after the segment.
+    ///
+    /// This function does not guarantee an update the node digests in the [MemoryImage] Merkle
+    /// tree. To ensure that the digests are up to date, call [MemoryImage::update_digests].
+    pub fn apply_to(&self, memory_image: &mut MemoryImage) -> Result<()> {
+        // TODO(victor/perf): Check that this clone does not introduce a performance penalty. If
+        // inlined, it should be possible to determine that this does not require an actual clone
+        // (which is a clone of an Arc).
+        for (idx, page) in self.update_partial_image.pages.iter() {
+            memory_image.set_page(*idx, page.clone());
+        }
+        Ok(())
+    }
+
+    /// Compute a partially populated [MemoryImage] containing all pages from the given memory
+    /// image that were accessed during this segment.
+    ///
+    /// This function does not guarantee the digests are up to date on the returned [MemoryImage].
+    /// Call [MemoryImage::update_digests] if needed to ensure the digests are up to date.
+    pub fn compute_partial_image(&self, memory_image: &mut MemoryImage) -> Result<MemoryImage> {
+        Ok(compute_partial_image(
+            memory_image,
+            &self.access_page_indexes,
+        ))
+    }
+
+    /// Construct a [Segment] from this struct and the given initial memory image.
+    ///
+    /// The initial partial memory image can be calculated with [Self::compute_partial_image], as
+    /// only accessed pages are required.
+    pub fn into_segment(self, partial_image: MemoryImage) -> Segment {
+        Segment {
+            partial_image,
+            input_digest: self.input_digest,
+            output_digest: self.output_digest,
+            terminate_state: self.terminate_state,
+            read_record: self.read_record,
+            write_record: self.write_record,
+            suspend_cycle: self.user_cycles,
+            paging_cycles: self.pager_cycles,
+            po2: self.po2,
+            index: self.index,
+            segment_threshold: self.segment_threshold,
+            povw_nonce: self.povw_nonce,
+        }
+    }
+}
+
 /// Maximum number of segments we can queue up before we block execution
 const MAX_OUTSTANDING_SEGMENTS: usize = 5;
 
@@ -162,36 +214,21 @@ fn create_segments(
 ) -> Result<(Digest, Digest, MemoryImage)> {
     let mut existing_image = initial_image;
     // NOTE: Calling MemoryImage::image_id here triggers hashing of the memory pages, updating all
-    // the internal node digests. A benefit of this is that memory pages that do not change during
-    // execution will not need to be hashed by the callback receiver.
+    // the internal node digests.
     let initial_digest = existing_image.image_id();
 
-    while let Ok(req) = recv.recv() {
+    while let Ok(update) = recv.recv() {
         // Compute the partial image that from the initial memory state that will be sent to
         // preflight for re-execution of the segment.
-        let partial_image = compute_partial_image(&mut existing_image, req.access_page_indexes);
+        let partial_image = update.compute_partial_image(&mut existing_image)?;
 
-        // Update the image held locally to the state after segment execution.
-        for (idx, page) in req.update_partial_image.pages {
-            existing_image.set_page(idx, page);
-        }
+        update.apply_to(&mut existing_image)?;
+        existing_image.update_digests();
 
-        let segment = Segment {
-            partial_image,
-            input_digest: req.input_digest,
-            output_digest: req.output_digest,
-            terminate_state: req.terminate_state,
-            read_record: req.read_record,
-            write_record: req.write_record,
-            suspend_cycle: req.user_cycles,
-            paging_cycles: req.pager_cycles,
-            po2: req.po2,
-            index: req.index,
-            segment_threshold: req.segment_threshold,
-            povw_nonce: req.povw_nonce,
-        };
+        let dump_path = update.dump_path.clone();
+        let segment = update.into_segment(partial_image);
 
-        if let Some(dump_path) = req.dump_path {
+        if let Some(dump_path) = dump_path {
             tracing::error!("{segment:?}");
 
             let bytes = segment.encode()?;

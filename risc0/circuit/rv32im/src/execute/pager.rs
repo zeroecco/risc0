@@ -568,7 +568,7 @@ pub(crate) fn page_idx(node_idx: u32) -> u32 {
 
 pub(crate) fn compute_partial_image(
     input_image: &mut MemoryImage,
-    indexes: BTreeSet<u32>,
+    indexes: &BTreeSet<u32>,
 ) -> MemoryImage {
     let mut partial_image = MemoryImage::default();
 
