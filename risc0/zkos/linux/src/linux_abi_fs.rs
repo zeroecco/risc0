@@ -266,6 +266,21 @@ pub fn sys_unlinkat(dfd: u32, pathname: u32, flag: u32) -> Result<u32, Err> {
         return Err(Err::NoSys);
     }
 
+    // Check for invalid address - NULL pointer
+    if pathname == 0 {
+        kprint!("sys_unlinkat: invalid pathname address (NULL)");
+        return Err(Err::Fault);
+    }
+
+    // Check if address is in user memory range (below kernel space)
+    if pathname >= 0xC0000000 {
+        kprint!(
+            "sys_unlinkat: invalid pathname address (out of user memory): 0x{:x}",
+            pathname
+        );
+        return Err(Err::Fault);
+    }
+
     // Read the pathname from user space
     let filename = unsafe { core::slice::from_raw_parts(pathname as *const u8, 256) };
     let null_pos = filename
@@ -280,6 +295,31 @@ pub fn sys_unlinkat(dfd: u32, pathname: u32, flag: u32) -> Result<u32, Err> {
             return Err(Err::NoSys);
         }
     };
+
+    // Check for empty pathname
+    if filename_str.is_empty() {
+        kprint!("sys_unlinkat: empty pathname, returning ENOENT");
+        return Err(Err::FileNotFound);
+    }
+
+    // Check for pathname too long (limit is 255 for 9P)
+    if filename_str.len() > 255 {
+        kprint!(
+            "sys_unlinkat: pathname too long ({} bytes), returning ENAMETOOLONG",
+            filename_str.len()
+        );
+        return Err(Err::NameTooLong);
+    }
+
+    // Validate flags - only AT_REMOVEDIR is valid
+    const AT_REMOVEDIR: u32 = 0x200;
+    if (flag & !AT_REMOVEDIR) != 0 {
+        kprint!(
+            "sys_unlinkat: invalid flag value 0x{:x}, returning EINVAL",
+            flag
+        );
+        return Err(Err::Inval);
+    }
 
     kprint!(
         "sys_unlinkat: dfd={}, filename='{}', flag={}",
@@ -317,11 +357,20 @@ pub fn sys_unlinkat(dfd: u32, pathname: u32, flag: u32) -> Result<u32, Err> {
                     return Err(Err::FileNotFound);
                 }
             }
-            crate::p9::P9Response::Error(_) => {
+            crate::p9::P9Response::Error(rlerror) => {
                 if dir_fid != starting_fid {
                     clunk(dir_fid, false);
                 }
-                return Err(Err::FileNotFound);
+                kprint!(
+                    "sys_unlinkat: walk to file failed with ecode={}",
+                    rlerror.ecode
+                );
+                // Map error codes properly
+                return match rlerror.ecode {
+                    2 => Err(Err::FileNotFound), // ENOENT
+                    20 => Err(Err::NotDir),      // ENOTDIR
+                    _ => Err(Err::FileNotFound),
+                };
             }
         },
         Err(_) => {
