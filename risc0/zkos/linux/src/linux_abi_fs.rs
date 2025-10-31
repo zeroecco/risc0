@@ -72,6 +72,11 @@ pub static mut CWD_FID: u32 = 0;
 pub static mut CWD_STR: String = String::new();
 pub static mut UMASK: u32 = 0o022; // Default umask value
 
+// 9P protocol maximum chunk size for reads/writes
+// The 9P msize is typically 8192 bytes. Message headers are ~23 bytes,
+// so we use 8000 bytes as a safe maximum for data per operation.
+const MAX_9P_IO_CHUNK: u32 = 8000;
+
 pub fn get_root_fid() -> u32 {
     unsafe { ROOT_FID }
 }
@@ -292,7 +297,7 @@ pub fn sys_unlinkat(dfd: u32, pathname: u32, flag: u32) -> Result<u32, Err> {
         Ok(s) => s,
         Err(_) => {
             kprint!("sys_unlinkat: invalid UTF-8 filename");
-            return Err(Err::NoSys);
+            return Err(Err::Inval); // EINVAL for invalid UTF-8
         }
     };
 
@@ -387,10 +392,10 @@ pub fn sys_unlinkat(dfd: u32, pathname: u32, flag: u32) -> Result<u32, Err> {
         Ok(bytes_written) => {
             kprint!("sys_unlinkat: sent {} bytes for Tremove", bytes_written);
         }
-        Err(e) => {
-            kprint!("sys_unlinkat: error sending Tremove: {:?}", e);
-            return Err(Err::NoSys);
-        }
+                Err(e) => {
+                    kprint!("sys_unlinkat: error sending Tremove: {:?}", e);
+                    return Err(Err::IO); // EIO for I/O errors
+                }
     }
 
     match RremoveMessage::read_response() {
@@ -477,7 +482,7 @@ pub fn sys_statfs64(path: u32, sz: u32, buf: u32) -> Result<u32, Err> {
     );
     if bytes_copied == 0 {
         kprint!("sys_statfs64: failed to copy statfs64 structure to user memory");
-        return Err(Err::NoSys);
+        return Err(Err::Fault); // EFAULT for memory copy failure
     }
 
     kprint!(
@@ -559,9 +564,9 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
                 Ok(_bytes_written) => {
                     // Success
                 }
-                Err(_e) => {
-                    kprint!("read_file_to_user_memory: error sending tread: {:?}", _e);
-                    return Err(Err::NoSys);
+                Err(e) => {
+                    kprint!("read_file_to_user_memory: error sending tread: {:?}", e);
+                    return Err(Err::IO); // EIO for I/O errors
                 }
             }
             match RreadMessage::read_response() {
@@ -584,11 +589,18 @@ pub fn read_file_to_user_memory(fd: u32, buf: u32, count: u32, offset: u64) -> R
                     cursor += rread.count as u64;
                     total_bytes_read += rread.count;
                 }
-                P9Response::Error(_rlerror) => {
-                    if _rlerror.ecode == 0 {
+                P9Response::Error(rlerror) => {
+                    if rlerror.ecode == 0 {
                         return Ok(total_bytes_read);
                     }
-                    return Err(Err::NoSys);
+                    kprint!("read_file_to_user_memory: Rread error: ecode={}", rlerror.ecode);
+                    // Map 9P error codes to appropriate errno
+                    return match rlerror.ecode {
+                        2 => Err(Err::FileNotFound), // ENOENT
+                        9 => Err(Err::BadFd),        // EBADF
+                        5 => Err(Err::IO),           // EIO
+                        _ => Err(Err::IO),           // Default to EIO for I/O errors
+                    };
                 }
             }
         }
@@ -627,8 +639,8 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
     let file_desc = get_file_desc(fd_entry.file_desc_id);
 
     // Check if file was opened with read access
-    // O_ACCMODE (0o3) masks the access mode: O_RDONLY=0, O_WRONLY=1, O_RDWR=2
-    let access_mode = file_desc.flags & 0o3;
+    // file_desc.mode contains p9 access mode: 0=read, 1=write, 2=read+write
+    let access_mode = file_desc.mode & 0x3;
     if access_mode == 1 {
         // O_WRONLY - can't read
         kprint!("sys_read: fd={} opened write-only", _fd);
@@ -642,53 +654,140 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
     }
 
     if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
-        // read with Tread and Rread from the fid using 9p protocol and update .cursor in FILE_DESC_TABLE
-        let tread = TreadMessage::new(0, file_desc.fid, file_desc.cursor, _count);
-        match tread.send_tread() {
-            Ok(_bytes_written) => {
-                // Success
-            }
-            Err(_e) => {
-                return Err(Err::NoSys);
-            }
-        }
-        match RreadMessage::read_response() {
-            P9Response::Success(rread) => {
-                kprint!("sys_read: received {} bytes from 9P", rread.count);
-                let user_ptr = _buf as *mut u8;
-                let data = rread.data;
+        // 9P protocol has a maximum message size (msize), typically 8192 bytes.
+        // Use MAX_9P_IO_CHUNK to respect this limit.
+        
+        let total_to_read = _count;
+        let mut total_read = 0u32;
+        let user_ptr = _buf as *mut u8;
+        
+        kprint!(
+            "sys_read: reading from fid={}, cursor={}, count={}, access_mode={}",
+            file_desc.fid,
+            file_desc.cursor,
+            total_to_read,
+            access_mode
+        );
 
-                if rread.count == 0 {
-                    kprint!("sys_read: read 0 bytes (EOF)");
-                    return Ok(0);
+        // Loop to read in chunks if necessary
+        while total_read < total_to_read {
+            let remaining = total_to_read - total_read;
+            let chunk_size = if remaining > MAX_9P_IO_CHUNK {
+                MAX_9P_IO_CHUNK
+            } else {
+                remaining
+            };
+            
+            // Get current file description state (it may have been updated in previous iteration)
+            let fd_entry = get_fd(_fd);
+            let current_desc = get_file_desc(fd_entry.file_desc_id);
+            
+            kprint!(
+                "sys_read: chunk read - requesting {} bytes at cursor {}",
+                chunk_size,
+                current_desc.cursor
+            );
+            
+            let tread = TreadMessage::new(0, current_desc.fid, current_desc.cursor, chunk_size);
+            match tread.send_tread() {
+                Ok(_bytes_written) => {
+                    // Success
                 }
+                Err(e) => {
+                    kprint!("sys_read: error sending Tread: {:?}", e);
+                    // If we already read some data, return what we got
+                    if total_read > 0 {
+                        return Ok(total_read);
+                    }
+                    return Err(Err::IO); // I/O error
+                }
+            }
+            
+            match RreadMessage::read_response() {
+                P9Response::Success(rread) => {
+                    kprint!("sys_read: received {} bytes from 9P", rread.count);
+                    
+                    if rread.count == 0 {
+                        kprint!("sys_read: read 0 bytes (EOF)");
+                        // EOF - return what we've read so far
+                        return Ok(total_read);
+                    }
 
-                kprint!(
-                    "sys_read: copying {} bytes to user buffer 0x{:08x}",
-                    rread.count,
-                    _buf
-                );
-                let bytes_copied =
-                    crate::kernel::copy_to_user(user_ptr, data.as_ptr(), rread.count as usize);
-
-                if bytes_copied == 0 {
                     kprint!(
-                        "sys_read: copy_to_user failed! dst=0x{:08x}, len={}",
-                        _buf,
-                        rread.count
+                        "sys_read: copying {} bytes to user buffer 0x{:08x}",
+                        rread.count,
+                        _buf as u32 + total_read
                     );
-                    return Err(Err::NoSys);
+                    
+                    let dest_ptr = unsafe { user_ptr.add(total_read as usize) };
+                    let bytes_copied = crate::kernel::copy_to_user(
+                        dest_ptr,
+                        rread.data.as_ptr(),
+                        rread.count as usize,
+                    );
+
+                    if bytes_copied == 0 {
+                        kprint!(
+                            "sys_read: copy_to_user failed! dst=0x{:08x}, len={}",
+                            dest_ptr as u32,
+                            rread.count
+                        );
+                        // If we already read some data, return what we got
+                        if total_read > 0 {
+                            return Ok(total_read);
+                        }
+                        return Err(Err::Fault); // EFAULT for memory copy failure
+                    }
+                    
+                    // Update totals
+                    total_read += rread.count;
+                    
+                    // Update the shared cursor in the file description
+                    let fd_entry = get_fd(_fd);
+                    let mut updated_desc = get_file_desc(fd_entry.file_desc_id);
+                    updated_desc.cursor += rread.count as u64;
+                    update_file_desc(fd_entry.file_desc_id, updated_desc);
+                    
+                    // If we got less than requested, we hit EOF
+                    if rread.count < chunk_size {
+                        kprint!(
+                            "sys_read: short read ({} < {}), EOF reached",
+                            rread.count,
+                            chunk_size
+                        );
+                        return Ok(total_read);
+                    }
                 }
-                // Update the shared cursor in the file description
-                let mut updated_desc = file_desc;
-                updated_desc.cursor += rread.count as u64;
-                update_file_desc(fd_entry.file_desc_id, updated_desc);
-                return Ok(rread.count);
-            }
-            P9Response::Error(_rlerror) => {
-                return Err(Err::NoSys);
+                P9Response::Error(rlerror) => {
+                    kprint!(
+                        "sys_read: Rread error: ecode={}, fid={}, cursor={}",
+                        rlerror.ecode,
+                        current_desc.fid,
+                        current_desc.cursor
+                    );
+                    // If we already read some data, return what we got
+                    if total_read > 0 {
+                        return Ok(total_read);
+                    }
+                    // Map 9P error codes to appropriate errno
+                    // Common error codes: 2=ENOENT, 9=EBADF, 5=EIO
+                    return match rlerror.ecode {
+                        2 => Err(Err::FileNotFound), // ENOENT
+                        9 => Err(Err::BadFd),        // EBADF
+                        5 => Err(Err::IO),           // EIO
+                        _ => Err(Err::IO),           // Default to EIO for I/O errors
+                    };
+                }
             }
         }
+        
+        kprint!("sys_read: successfully read {} bytes total", total_read);
+        return Ok(total_read);
+    } else {
+        kprint!(
+            "sys_read: invalid fid={} (skipping read, fid is 0 or 0xFFFF_FFFE)",
+            file_desc.fid
+        );
     }
     let msg = b"sys_read not implemented";
     host_log(msg.as_ptr(), msg.len());
@@ -734,8 +833,8 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
         let mut file_desc = get_file_desc(fd_entry.file_desc_id);
 
         // Check if file was opened with write access
-        // O_ACCMODE (0o3) masks the access mode: O_RDONLY=0, O_WRONLY=1, O_RDWR=2
-        let access_mode = file_desc.flags & 0o3;
+        // file_desc.mode contains p9 access mode: 0=read, 1=write, 2=read+write
+        let access_mode = file_desc.mode & 0x3;
         if access_mode == 0 {
             // O_RDONLY - can't write
             kprint!("do_write: fd={} opened read-only", fd);
@@ -758,26 +857,26 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
                                 current_cursor
                             );
                         }
-                        P9Response::Error(_) => {
-                            kprint!("do_write: error getting file size for O_APPEND");
-                            return Err(Err::NoSys);
+                        P9Response::Error(rlerror) => {
+                            kprint!("do_write: error getting file size for O_APPEND: ecode={}", rlerror.ecode);
+                            return Err(Err::IO); // EIO for I/O errors
                         }
                     },
-                    Err(_) => {
-                        kprint!("do_write: error sending getattr for O_APPEND");
-                        return Err(Err::NoSys);
+                    Err(e) => {
+                        kprint!("do_write: error sending getattr for O_APPEND: {:?}", e);
+                        return Err(Err::IO); // EIO for I/O errors
                     }
                 }
             }
 
-            // Write in chunks of 512 bytes
-            const CHUNK_SIZE: usize = 512;
+            // Write in chunks respecting the 9P msize limit
+            let chunk_size = MAX_9P_IO_CHUNK as usize;
             let mut total_written = 0;
 
             let data = unsafe { core::slice::from_raw_parts(buf, count) };
 
-            for chunk_start in (0..count).step_by(CHUNK_SIZE) {
-                let chunk_end = (chunk_start + CHUNK_SIZE).min(count);
+            for chunk_start in (0..count).step_by(chunk_size) {
+                let chunk_end = (chunk_start + chunk_size).min(count);
                 let chunk_data = &data[chunk_start..chunk_end];
 
                 kprint!(
@@ -793,9 +892,9 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
                     Ok(_bytes_written) => {
                         // Success
                     }
-                    Err(_e) => {
-                        kprint!("do_write: error sending Twrite: {:?}", _e);
-                        return Err(Err::NoSys);
+                    Err(e) => {
+                        kprint!("do_write: error sending Twrite: {:?}", e);
+                        return Err(Err::IO); // EIO for I/O errors
                     }
                 }
 
@@ -816,9 +915,15 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
                             break;
                         }
                     }
-                    P9Response::Error(_rlerror) => {
-                        kprint!("do_write: error sending Rwrite: {:?}", _rlerror);
-                        return Err(Err::NoSys);
+                    P9Response::Error(rlerror) => {
+                        kprint!("do_write: Rwrite error: ecode={}", rlerror.ecode);
+                        // Map 9P error codes to appropriate errno
+                        return match rlerror.ecode {
+                            2 => Err(Err::FileNotFound), // ENOENT
+                            9 => Err(Err::BadFd),        // EBADF
+                            5 => Err(Err::IO),           // EIO
+                            _ => Err(Err::IO),           // Default to EIO for I/O errors
+                        };
                     }
                 }
             }
@@ -2510,33 +2615,61 @@ pub fn sys_fgetxattr(fd: u32, name: u32, value: u32, size: u32) -> Result<u32, E
                 return Err(Err::Range); // E2BIG
             }
 
-            // Read the xattr value
-            let tread = crate::p9::TreadMessage::new(0, 0xFFFF_FFF9, 0, xattr_size as u32);
-            match tread.send_tread() {
-                Ok(_) => {}
-                Err(_) => {
-                    clunk(0xFFFF_FFF9, false);
-                    return Err(Err::NoSys);
+            // Read the xattr value in chunks to respect 9P msize limit
+            let mut total_read = 0u64;
+            let total_to_read = xattr_size;
+            
+            while total_read < total_to_read {
+                let remaining = total_to_read - total_read;
+                let chunk_size = if remaining > MAX_9P_IO_CHUNK as u64 {
+                    MAX_9P_IO_CHUNK
+                } else {
+                    remaining as u32
+                };
+                
+                let tread = crate::p9::TreadMessage::new(0, 0xFFFF_FFF9, total_read, chunk_size);
+                match tread.send_tread() {
+                    Ok(_) => {}
+                    Err(_) => {
+                        clunk(0xFFFF_FFF9, false);
+                        return Err(Err::IO);
+                    }
                 }
-            }
 
-            match crate::p9::RreadMessage::read_response() {
-                crate::p9::P9Response::Success(rread) => {
-                    let data_len = rread.data.len().min(size as usize);
-                    if value != 0 {
-                        unsafe {
-                            let dest = core::slice::from_raw_parts_mut(value as *mut u8, data_len);
-                            dest.copy_from_slice(&rread.data[..data_len]);
+                match crate::p9::RreadMessage::read_response() {
+                    crate::p9::P9Response::Success(rread) => {
+                        if rread.count == 0 {
+                            // EOF reached
+                            break;
+                        }
+                        
+                        if value != 0 {
+                            unsafe {
+                                let dest_offset = value as usize + total_read as usize;
+                                let dest = core::slice::from_raw_parts_mut(
+                                    dest_offset as *mut u8,
+                                    rread.count as usize
+                                );
+                                dest.copy_from_slice(&rread.data[..rread.count as usize]);
+                            }
+                        }
+                        
+                        total_read += rread.count as u64;
+                        
+                        // Short read means EOF
+                        if rread.count < chunk_size {
+                            break;
                         }
                     }
-                    clunk(0xFFFF_FFF9, false);
-                    Ok(data_len as u32)
-                }
-                crate::p9::P9Response::Error(_) => {
-                    clunk(0xFFFF_FFF9, false);
-                    Err(Err::NoSys)
+                    crate::p9::P9Response::Error(_) => {
+                        clunk(0xFFFF_FFF9, false);
+                        return Err(Err::IO);
+                    }
                 }
             }
+            
+            clunk(0xFFFF_FFF9, false);
+            Ok(total_read.min(size as u64) as u32)
         }
         crate::p9::P9Response::Error(rlerror) => {
             kprint!("sys_fgetxattr: xattrwalk failed: ecode={}", rlerror.ecode);
@@ -2608,33 +2741,61 @@ pub fn sys_flistxattr(fd: u32, list: u32, size: u32) -> Result<u32, Err> {
                 return Err(Err::Range); // E2BIG
             }
 
-            // Read the xattr list
-            let tread = crate::p9::TreadMessage::new(0, list_fid, 0, xattr_list_size as u32);
-            match tread.send_tread() {
-                Ok(_) => {}
-                Err(_) => {
-                    clunk(list_fid, false);
-                    return Err(Err::NoSys);
+            // Read the xattr list in chunks to respect 9P msize limit
+            let mut total_read = 0u64;
+            let total_to_read = xattr_list_size;
+            
+            while total_read < total_to_read {
+                let remaining = total_to_read - total_read;
+                let chunk_size = if remaining > MAX_9P_IO_CHUNK as u64 {
+                    MAX_9P_IO_CHUNK
+                } else {
+                    remaining as u32
+                };
+                
+                let tread = crate::p9::TreadMessage::new(0, list_fid, total_read, chunk_size);
+                match tread.send_tread() {
+                    Ok(_) => {}
+                    Err(_) => {
+                        clunk(list_fid, false);
+                        return Err(Err::IO);
+                    }
                 }
-            }
 
-            match crate::p9::RreadMessage::read_response() {
-                crate::p9::P9Response::Success(rread) => {
-                    let data_len = rread.data.len().min(size as usize);
-                    if list != 0 {
-                        unsafe {
-                            let dest = core::slice::from_raw_parts_mut(list as *mut u8, data_len);
-                            dest.copy_from_slice(&rread.data[..data_len]);
+                match crate::p9::RreadMessage::read_response() {
+                    crate::p9::P9Response::Success(rread) => {
+                        if rread.count == 0 {
+                            // EOF reached
+                            break;
+                        }
+                        
+                        if list != 0 {
+                            unsafe {
+                                let dest_offset = list as usize + total_read as usize;
+                                let dest = core::slice::from_raw_parts_mut(
+                                    dest_offset as *mut u8,
+                                    rread.count as usize
+                                );
+                                dest.copy_from_slice(&rread.data[..rread.count as usize]);
+                            }
+                        }
+                        
+                        total_read += rread.count as u64;
+                        
+                        // Short read means EOF
+                        if rread.count < chunk_size {
+                            break;
                         }
                     }
-                    clunk(list_fid, false);
-                    Ok(data_len as u32)
-                }
-                crate::p9::P9Response::Error(_) => {
-                    clunk(list_fid, false);
-                    Err(Err::NoSys)
+                    crate::p9::P9Response::Error(_) => {
+                        clunk(list_fid, false);
+                        return Err(Err::IO);
+                    }
                 }
             }
+            
+            clunk(list_fid, false);
+            Ok(total_read.min(size as u64) as u32)
         }
         crate::p9::P9Response::Error(rlerror) => {
             kprint!("sys_flistxattr: xattrwalk failed: ecode={}", rlerror.ecode);
@@ -2905,38 +3066,65 @@ pub fn sys_fsetxattr(fd: u32, name: u32, value: u32, size: u32, flags: u32) -> R
                 xattr_fid
             );
 
-            // Now write the xattr value to the xattr FID
+            // Now write the xattr value to the xattr FID in chunks
             if size > 0 && value != 0 {
                 let value_buf =
                     unsafe { core::slice::from_raw_parts(value as *const u8, size as usize) };
 
-                // Write to the xattr FID
-                let twrite = crate::p9::TwriteMessage::new(0, xattr_fid, 0, value_buf.to_vec());
-                match twrite.send_twrite() {
-                    Ok(_) => {}
-                    Err(_) => {
-                        clunk(xattr_fid, false);
-                        return Err(Err::NoSys);
-                    }
-                }
-
-                match crate::p9::RwriteMessage::read_response() {
-                    crate::p9::P9Response::Success(rwrite) => {
-                        kprint!("sys_fsetxattr: wrote {} bytes", rwrite.count);
-                        if rwrite.count != size {
-                            kprint!(
-                                "sys_fsetxattr: write size mismatch: expected {}, got {}",
-                                size,
-                                rwrite.count
-                            );
+                let mut total_written = 0u32;
+                let chunk_size = MAX_9P_IO_CHUNK as usize;
+                
+                for chunk_start in (0..size as usize).step_by(chunk_size) {
+                    let chunk_end = (chunk_start + chunk_size).min(size as usize);
+                    let chunk_data = &value_buf[chunk_start..chunk_end];
+                    
+                    // Write to the xattr FID
+                    let twrite = crate::p9::TwriteMessage::new(
+                        0,
+                        xattr_fid,
+                        chunk_start as u64,
+                        chunk_data.to_vec()
+                    );
+                    match twrite.send_twrite() {
+                        Ok(_) => {}
+                        Err(_) => {
                             clunk(xattr_fid, false);
                             return Err(Err::IO);
                         }
                     }
-                    crate::p9::P9Response::Error(_) => {
-                        clunk(xattr_fid, false);
-                        return Err(Err::NoSys);
+
+                    match crate::p9::RwriteMessage::read_response() {
+                        crate::p9::P9Response::Success(rwrite) => {
+                            kprint!("sys_fsetxattr: wrote {} bytes", rwrite.count);
+                            total_written += rwrite.count;
+                            
+                            // If we wrote fewer bytes than requested, it's an error
+                            if rwrite.count != chunk_data.len() as u32 {
+                                kprint!(
+                                    "sys_fsetxattr: write size mismatch: expected {}, got {}",
+                                    chunk_data.len(),
+                                    rwrite.count
+                                );
+                                clunk(xattr_fid, false);
+                                return Err(Err::IO);
+                            }
+                        }
+                        crate::p9::P9Response::Error(_) => {
+                            clunk(xattr_fid, false);
+                            return Err(Err::IO);
+                        }
                     }
+                }
+                
+                // Verify total written matches expected size
+                if total_written != size {
+                    kprint!(
+                        "sys_fsetxattr: total write mismatch: expected {}, got {}",
+                        size,
+                        total_written
+                    );
+                    clunk(xattr_fid, false);
+                    return Err(Err::IO);
                 }
             }
 
