@@ -855,6 +855,15 @@ pub fn sys_chdir(filename: u32) -> Result<u32, Err> {
 
     kprint!("sys_chdir: filename='{}'", filename_str);
 
+    // Check for pathname too long (limit is 255 for 9P)
+    if filename_str.len() > 255 {
+        kprint!(
+            "sys_chdir: pathname too long ({} bytes), returning ENAMETOOLONG",
+            filename_str.len()
+        );
+        return Err(Err::NameTooLong);
+    }
+
     let starting_fid = if filename_str.starts_with("/") {
         get_root_fid()
     } else {
@@ -2292,11 +2301,16 @@ pub fn sys_utimensat_time64(dfd: u32, filename: u32, times: u32, flags: u32) -> 
         // Parse times and update
         let (atime_sec, atime_nsec, mtime_sec, mtime_nsec) = parse_times(times)?;
 
-        let valid = P9SetattrMask::Atime as u32 | P9SetattrMask::Mtime as u32;
+        // Set both Atime+AtimeSet and Mtime+MtimeSet flags to set specific times
+        // (without AtimeSet/MtimeSet, the server sets times to "now")
+        let valid = P9SetattrMask::Atime as u32
+            | P9SetattrMask::AtimeSet as u32
+            | P9SetattrMask::Mtime as u32
+            | P9SetattrMask::MtimeSet as u32;
         let tsetattr = TsetattrMessage::new(
             0,          // tag
             fid,        // fid
-            valid,      // valid mask (Atime and Mtime)
+            valid,      // valid mask (Atime+AtimeSet and Mtime+MtimeSet)
             0,          // mode (not changing)
             0,          // uid (not changing)
             0,          // gid (not changing)
@@ -2322,11 +2336,16 @@ pub fn sys_utimensat_time64(dfd: u32, filename: u32, times: u32, flags: u32) -> 
         let (atime_sec, atime_nsec, mtime_sec, mtime_nsec) = parse_times(times)?;
 
         // Create Tsetattr message to update times
-        let valid = P9SetattrMask::Atime as u32 | P9SetattrMask::Mtime as u32;
+        // Set both Atime+AtimeSet and Mtime+MtimeSet flags to set specific times
+        // (without AtimeSet/MtimeSet, the server sets times to "now")
+        let valid = P9SetattrMask::Atime as u32
+            | P9SetattrMask::AtimeSet as u32
+            | P9SetattrMask::Mtime as u32
+            | P9SetattrMask::MtimeSet as u32;
         let tsetattr = TsetattrMessage::new(
             0,           // tag
             0xFFFF_FFFE, // fid (the file we walked to)
-            valid,       // valid mask (Atime and Mtime)
+            valid,       // valid mask (Atime+AtimeSet and Mtime+MtimeSet)
             0,           // mode (not changing)
             0,           // uid (not changing)
             0,           // gid (not changing)
@@ -4844,7 +4863,14 @@ fn do_walk(
 
                     // Walk to the resolved path
                     let resolved_wnames = normalize_path(&resolved_path);
-                    return do_walk(starting_fid, target_fid, resolved_wnames);
+                    // For absolute paths, start from root; for relative paths, use starting_fid
+                    let walk_from_fid = if symlink_target.starts_with('/') {
+                        kprint!("do_walk: absolute symlink, walking from root");
+                        get_root_fid()
+                    } else {
+                        starting_fid
+                    };
+                    return do_walk(walk_from_fid, target_fid, resolved_wnames);
                 }
                 Ok((0, rwalk.wqids))
             }
