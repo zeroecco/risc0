@@ -626,6 +626,15 @@ pub fn sys_read(_fd: u32, _buf: u32, _count: u32) -> Result<u32, Err> {
 
     let file_desc = get_file_desc(fd_entry.file_desc_id);
 
+    // Check if file was opened with read access
+    // O_ACCMODE (0o3) masks the access mode: O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+    let access_mode = file_desc.flags & 0o3;
+    if access_mode == 1 {
+        // O_WRONLY - can't read
+        kprint!("sys_read: fd={} opened write-only", _fd);
+        return Err(Err::BadFd);
+    }
+
     // Check if fd is a directory
     if file_desc.is_dir {
         kprint!("sys_read: fd={} is a directory", _fd);
@@ -723,6 +732,16 @@ pub fn do_write(fd: i32, buf: *const u8, count: usize) -> Result<usize, Err> {
         }
 
         let mut file_desc = get_file_desc(fd_entry.file_desc_id);
+
+        // Check if file was opened with write access
+        // O_ACCMODE (0o3) masks the access mode: O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+        let access_mode = file_desc.flags & 0o3;
+        if access_mode == 0 {
+            // O_RDONLY - can't write
+            kprint!("do_write: fd={} opened read-only", fd);
+            return Err(Err::BadFd);
+        }
+
         if file_desc.fid != 0 && file_desc.fid != 0xFFFF_FFFE {
             // Handle O_APPEND: position at end of file before each write
             let mut current_cursor = file_desc.cursor;
@@ -3113,12 +3132,21 @@ pub fn sys_symlinkat(target: u32, newdirfd: u32, linkpath: u32) -> Result<u32, E
         return Err(Err::NoSys);
     }
 
-    // Parse target (symlink contents) and linkpath (symlink name)
-    let target_buf = unsafe { core::slice::from_raw_parts(target as *const u8, 256) };
+    // Parse target (symlink contents) - read up to PATH_MAX to check for ENAMETOOLONG
+    // PATH_MAX is typically 4096, but we'll use 4097 to detect paths that are too long
+    const PATH_MAX_CHECK: usize = 4097;
+    let target_buf = unsafe { core::slice::from_raw_parts(target as *const u8, PATH_MAX_CHECK) };
     let target_null_pos = target_buf
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(target_buf.len());
+    
+    // Check if target path is too long (>= PATH_MAX = 4096)
+    if target_null_pos >= 4096 {
+        kprint!("sys_symlinkat: target path too long ({} bytes)", target_null_pos);
+        return Err(Err::NameTooLong);
+    }
+    
     let target_str = match str::from_utf8(&target_buf[..target_null_pos]) {
         Ok(s) => s,
         Err(_) => {
@@ -3127,11 +3155,18 @@ pub fn sys_symlinkat(target: u32, newdirfd: u32, linkpath: u32) -> Result<u32, E
         }
     };
 
-    let linkpath_buf = unsafe { core::slice::from_raw_parts(linkpath as *const u8, 256) };
+    let linkpath_buf = unsafe { core::slice::from_raw_parts(linkpath as *const u8, PATH_MAX_CHECK) };
     let linkpath_null_pos = linkpath_buf
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(linkpath_buf.len());
+    
+    // Check if linkpath is too long
+    if linkpath_null_pos >= 4096 {
+        kprint!("sys_symlinkat: linkpath too long ({} bytes)", linkpath_null_pos);
+        return Err(Err::NameTooLong);
+    }
+    
     let linkpath_str = match str::from_utf8(&linkpath_buf[..linkpath_null_pos]) {
         Ok(s) => s,
         Err(_) => {
