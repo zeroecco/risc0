@@ -70,6 +70,7 @@ pub const F_UNLCK: u32 = 2; // Unlock
 pub static mut ROOT_FID: u32 = 0;
 pub static mut CWD_FID: u32 = 0;
 pub static mut CWD_STR: String = String::new();
+pub static mut UMASK: u32 = 0o022; // Default umask value
 
 pub fn get_root_fid() -> u32 {
     unsafe { ROOT_FID }
@@ -1905,6 +1906,33 @@ pub fn sys_fchmodat2(dfd: u32, filename: u32, mode: u32, flag: u32) -> Result<u3
     sys_fchmodat(dfd, filename, mode, flag)
 }
 
+pub fn sys_umask(mask: u32) -> Result<u32, Err> {
+    // umask() sets the calling process's file mode creation mask (umask) to mask & 0o777
+    // and returns the previous value of the mask.
+    // The umask is used to mask off permission bits for newly created files and directories.
+
+    let old_mask = unsafe { UMASK };
+    let new_mask = mask & 0o777; // Only the lower 9 bits (permission bits) are used
+
+    unsafe {
+        UMASK = new_mask;
+    }
+
+    kprint!(
+        "sys_umask: old_mask=0o{:o}, new_mask=0o{:o}",
+        old_mask,
+        new_mask
+    );
+
+    // Return the previous mask value
+    Ok(old_mask)
+}
+
+#[allow(dead_code)]
+pub fn get_umask() -> u32 {
+    unsafe { UMASK }
+}
+
 pub fn sys_fchown(fd: u32, user: u32, group: u32) -> Result<u32, Err> {
     if !get_p9_enabled() {
         let msg = b"sys_fchown: p9 is not enabled";
@@ -3232,7 +3260,17 @@ pub fn sys_mkdirat(_dfd: u32, _pathname: u32, _mode: u32) -> Result<u32, Err> {
     );
     resolve_path(_dfd, &dir_path, 0xFFFF_FFFE)?;
 
-    let tmkdir = TmkdirMessage::new(0, 0xFFFF_FFFE, file_name.to_string(), _mode, 0);
+    // Apply umask to the mode
+    let umask_value = get_umask();
+    let final_mode = _mode & !umask_value;
+    kprint!(
+        "sys_mkdirat: requested_mode=0o{:o}, umask=0o{:o}, final_mode=0o{:o}",
+        _mode,
+        umask_value,
+        final_mode
+    );
+
+    let tmkdir = TmkdirMessage::new(0, 0xFFFF_FFFE, file_name.to_string(), final_mode, 0);
     match tmkdir.send_tmkdir() {
         Ok(bytes_written) => {
             kprint!("sys_mkdirat: sent {} bytes for Tmkdir", bytes_written);
@@ -3290,6 +3328,16 @@ pub fn sys_mknodat(_dfd: u32, _filename: u32, _mode: u32, _dev: u32) -> Result<u
     let (dir_path, file_name) = split_path(filename_str);
     resolve_path(_dfd, &dir_path, 0xFFFF_FFFE)?;
 
+    // Apply umask to the mode
+    let umask_value = get_umask();
+    let final_mode = _mode & !umask_value;
+    kprint!(
+        "sys_mknodat: requested_mode=0o{:o}, umask=0o{:o}, final_mode=0o{:o}",
+        _mode,
+        umask_value,
+        final_mode
+    );
+
     // Extract major and minor device numbers from _dev
     // In Linux, the device number is encoded as (major << 8) | minor for 8-bit minor
     // or (major << 20) | minor for 12-bit minor, but we'll use the simpler 8-bit version
@@ -3300,7 +3348,7 @@ pub fn sys_mknodat(_dfd: u32, _filename: u32, _mode: u32, _dev: u32) -> Result<u
         0,
         0xFFFF_FFFE,
         file_name.to_string(),
-        _mode,
+        final_mode,
         major,
         minor,
         0,
@@ -5224,8 +5272,18 @@ fn do_openat(dfd: u32, filename_str: &str, _flags: u32, mode: u32) -> Result<u32
         let (dir_path, file_name) = split_path(filename_str);
         resolve_path(dfd, &dir_path, file_fid)?;
 
-        // Preserve permission bits including sticky bit, setuid, setgid
-        let p9_mode = mode & 0o7777; // Permission bits + special bits (sticky, setuid, setgid)
+        // Apply umask to permission bits, but preserve special bits (setuid, setgid, sticky)
+        let permission_bits = mode & 0o777; // Get permission bits
+        let umask_value = get_umask();
+        let masked_permissions = permission_bits & !umask_value; // Apply umask
+        let special_bits = mode & 0o7000; // Get special bits (setuid, setgid, sticky)
+        let p9_mode = special_bits | masked_permissions; // Combine them
+        kprint!(
+            "sys_openat: requested_mode=0o{:o}, umask=0o{:o}, final_mode=0o{:o}",
+            mode,
+            umask_value,
+            p9_mode
+        );
         // Create the file using Tlcreate
         let tlcreate =
             TlcreateMessage::new(0, file_fid, file_name.to_string(), p9_flags, p9_mode, 0); // flags=p9_flags, mode=p9_mode, gid=0

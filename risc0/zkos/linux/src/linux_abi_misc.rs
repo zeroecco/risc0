@@ -1476,12 +1476,6 @@ pub fn sys_times(_tbuf: u32) -> Result<u32, Err> {
 //     Err(Err::NoSys)
 // }
 
-pub fn sys_umask(_mask: u32) -> Result<u32, Err> {
-    let msg = b"sys_umask not implemented";
-    host_log(msg.as_ptr(), msg.len());
-    Err(Err::NoSys)
-}
-
 pub fn sys_uname(_buf: u32) -> Result<u32, Err> {
     let msg = b"sys_uname not implemented";
     host_log(msg.as_ptr(), msg.len());
