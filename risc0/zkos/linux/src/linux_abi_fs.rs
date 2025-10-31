@@ -2933,11 +2933,7 @@ pub fn sys_fsetxattr(fd: u32, name: u32, value: u32, size: u32, flags: u32) -> R
 }
 
 pub fn sys_getcwd(_buf: u32, _size: u32) -> Result<u32, Err> {
-    if _buf == 0 {
-        let msg = b"sys_getcwd: _buf is null";
-        host_log(msg.as_ptr(), msg.len());
-        return Err(Err::NoSys);
-    }
+    // Get the current working directory first to check size requirements
     let mut cwd_str = get_cwd_str();
     // strip the trailing / if it's not "/"
     if cwd_str != "/" && cwd_str.ends_with("/") {
@@ -2946,17 +2942,35 @@ pub fn sys_getcwd(_buf: u32, _size: u32) -> Result<u32, Err> {
     // add a null-terminator
     cwd_str.push('\0');
     let cwd_str_len = cwd_str.len();
-    if cwd_str_len > _size as usize {
-        return Err(Err::NoSys);
+
+    // Check size FIRST - ERANGE takes precedence over EFAULT
+    // This includes size==0 and buffer too small cases
+    if _size == 0 || cwd_str_len > _size as usize {
+        kprint!(
+            "sys_getcwd: buffer too small (need {}, have {})",
+            cwd_str_len,
+            _size
+        );
+        return Err(Err::Range); // ERANGE
     }
+
+    // Now check for NULL buffer (after size check)
+    // Note: glibc handles getcwd(NULL, size) by allocating memory before calling syscall
+    if _buf == 0 {
+        kprint!("sys_getcwd: _buf is null");
+        return Err(Err::Fault);
+    }
+
     let buf = unsafe { core::slice::from_raw_parts_mut(_buf as *mut u8, cwd_str_len) };
     // copy the string into buffer, null-terminated utf-8
     buf.copy_from_slice(cwd_str.as_bytes());
     kprint!(
-        "sys_getcwd: cwd_str='{:?}' cwd_str_len={}",
-        &buf[..cwd_str_len],
+        "sys_getcwd: cwd_str='{}' cwd_str_len={}",
+        cwd_str.trim_end_matches('\0'),
         cwd_str_len
     );
+    // The syscall returns the length (including null terminator), not the pointer
+    // The C library wrapper converts this to a pointer for the user
     Ok(cwd_str_len as u32)
 }
 
