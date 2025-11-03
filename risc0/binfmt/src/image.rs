@@ -120,7 +120,6 @@ pub struct MemoryImage {
 
     /// Set of indices that are marked as dirty (i.e. that a descendant was updated since the last
     /// time this digest was updated).
-    ///
     #[debug("{} entries", dirty.len())]
     dirty: BTreeSet<u32>,
 }
@@ -364,6 +363,7 @@ impl MemoryImage {
         let lhs_idx = digest_idx * 2;
         let rhs_idx = digest_idx * 2 + 1;
         let zero_fill = || ZERO_CACHE.digests[child_depth];
+        // When updating the digest, populate any unpopulated children to preserve invariant C.
         let lhs = *self.digests.entry(lhs_idx).or_insert_with(zero_fill);
         let rhs = *self.digests.entry(rhs_idx).or_insert_with(zero_fill);
 
@@ -375,6 +375,8 @@ impl MemoryImage {
     fn update_page_digest(&mut self, digest_idx: u32) {
         assert!(digest_idx >= MEMORY_PAGES as u32);
         let page_idx = digest_idx - MEMORY_PAGES as u32;
+        // NOTE: The page must be set because this function will only be called if the digest was
+        // marked as dirty. The digest will only be marked as dirty if the page was set.
         let digest = self.pages.get(&page_idx).unwrap().digest();
         self.digests.insert(digest_idx, digest);
     }
