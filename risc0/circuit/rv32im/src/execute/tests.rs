@@ -43,7 +43,7 @@ fn basic() {
     let segments = session.segments;
     assert_eq!(segments.len(), 1);
     let segment = segments.first().unwrap();
-    let segment_claim = segment.execute().unwrap().claim;
+    let segment_claim = segment.execute().unwrap().claim();
     assert_eq!(segment_claim.pre_state, pre_image_id);
     assert_ne!(segment_claim.post_state, pre_image_id);
     assert_eq!(segment.input_digest, Digest::ZERO);
@@ -72,14 +72,14 @@ fn system_split() {
 
     let segments = session.segments;
     assert_eq!(segments.len(), 2);
-    let segment0_claim = segments[0].execute().unwrap().claim;
+    let segment0_claim = segments[0].execute().unwrap().claim();
     assert_eq!(segment0_claim.pre_state, pre_image_id);
     assert_ne!(segment0_claim.post_state, pre_image_id);
     assert_eq!(segments[0].input_digest, Digest::ZERO);
     assert_eq!(segments[0].output_digest, None);
     assert_eq!(segments[0].terminate_state, None);
 
-    let segment1_claim = segments[1].execute().unwrap().claim;
+    let segment1_claim = segments[1].execute().unwrap().claim();
     assert_eq!(segment1_claim.pre_state, segment0_claim.post_state);
     assert_ne!(segment1_claim.post_state, segment1_claim.pre_state);
     assert_eq!(segments[1].input_digest, Digest::ZERO);

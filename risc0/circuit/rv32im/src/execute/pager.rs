@@ -289,6 +289,17 @@ impl WorkingImage {
     }
 }
 
+impl From<WorkingImage> for MemoryImage {
+    /// Convert the given WorkingImage into a [MemoryImage]. Does not compute any digests.
+    fn from(val: WorkingImage) -> Self {
+        let mut memory_image = MemoryImage::default();
+        for (idx, page) in val.pages {
+            memory_image.set_page(idx, page);
+        }
+        memory_image
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PagedMemory {
     pub(crate) image: WorkingImage,
