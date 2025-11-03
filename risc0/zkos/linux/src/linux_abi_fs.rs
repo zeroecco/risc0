@@ -72,10 +72,10 @@ pub static mut CWD_FID: u32 = 0;
 pub static mut CWD_STR: String = String::new();
 pub static mut UMASK: u32 = 0o022; // Default umask value
 
-// 9P protocol maximum chunk size for reads/writes
-// The 9P msize is typically 8192 bytes. Message headers are ~23 bytes,
-// so we use 8000 bytes as a safe maximum for data per operation.
-const MAX_9P_IO_CHUNK: u32 = 8000;
+// Max chunk size for 9P I/O operations
+// Must fit in the 1024-byte Twrite/Tread message buffer with ~23 bytes of overhead
+// Using 1000 to leave safe margin for message headers (1000 + 23 = 1023 < 1024)
+const MAX_9P_IO_CHUNK: u32 = 1000;
 
 pub fn get_root_fid() -> u32 {
     unsafe { ROOT_FID }
@@ -5077,7 +5077,69 @@ fn do_walk(
     }
     match RwalkMessage::read_response() {
         P9Response::Success(rwalk) => {
+            kprint!(
+                "do_walk: rwalk.wqids.len()={}, wnames_len={}, wqids={:?}",
+                rwalk.wqids.len(),
+                wnames_len,
+                rwalk.wqids
+            );
             if rwalk.wqids.len() != wnames_len {
+                kprint!(
+                    "do_walk: walk failed - expected {} components, got {}",
+                    wnames_len,
+                    rwalk.wqids.len()
+                );
+                
+                // Check if we stopped at a symlink in the middle of the path
+                if rwalk.wqids.len() > 0 {
+                    if let Some(last_qid) = rwalk.wqids.last() {
+                        if last_qid.is_symlink() {
+                            kprint!(
+                                "do_walk: stopped at symlink at position {}/{}",
+                                rwalk.wqids.len(),
+                                wnames_len
+                            );
+                            
+                            // Read the symlink target
+                            let symlink_target = read_symlink(target_fid)?;
+                            kprint!("do_walk: intermediate symlink target = '{}'", symlink_target);
+                            
+                            // Build the path up to the symlink
+                            let symlink_wnames: Vec<String> =
+                                wnames_clone.iter().take(rwalk.wqids.len()).cloned().collect();
+                            
+                            // Resolve the symlink target relative to its directory
+                            let resolved_symlink_path =
+                                resolve_symlink_target(&symlink_target, &symlink_wnames)?;
+                            kprint!(
+                                "do_walk: resolved intermediate symlink to '{}'",
+                                resolved_symlink_path
+                            );
+                            
+                            // Append the remaining path components
+                            let mut full_resolved_path = resolved_symlink_path;
+                            for i in rwalk.wqids.len()..wnames_len {
+                                full_resolved_path.push('/');
+                                full_resolved_path.push_str(&wnames_clone[i]);
+                            }
+                            kprint!("do_walk: full resolved path = '{}'", full_resolved_path);
+                            
+                            // Close the current target_fid
+                            clunk(target_fid, false);
+                            
+                            // Walk to the fully resolved path
+                            let resolved_wnames = normalize_path(&full_resolved_path);
+                            let walk_from_fid = if symlink_target.starts_with('/') {
+                                kprint!("do_walk: absolute intermediate symlink, walking from root");
+                                get_root_fid()
+                            } else {
+                                starting_fid
+                            };
+                            return do_walk(walk_from_fid, target_fid, resolved_wnames);
+                        }
+                    }
+                }
+                
                 clunk(target_fid, false);
                 Err(Err::FileNotFound)
             } else {
@@ -5685,16 +5747,23 @@ fn dirname(path: &str) -> String {
 
 fn normalize_path(path: &str) -> Vec<String> {
     let split: Vec<String> = path.split("/").map(|s| s.to_string()).collect();
-    // remove ./
+    // remove ./ and handle ..
     let mut new_path = Vec::new();
     for s in split {
-        if s == "." {
+        if s == "." || s.is_empty() {
             continue;
+        } else if s == ".." {
+            // Remove the previous component if it exists and is not ".."
+            if !new_path.is_empty() && new_path.last() != Some(&"..".to_string()) {
+                new_path.pop();
+            } else {
+                // If no previous component, keep the ".." (for relative paths)
+                new_path.push(s);
+            }
+        } else {
+            new_path.push(s);
         }
-        new_path.push(s);
     }
-    // remove all empty strings in new_path
-    new_path.retain(|s| !s.is_empty());
     new_path
 }
 

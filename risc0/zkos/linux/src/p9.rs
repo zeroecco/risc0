@@ -1361,7 +1361,9 @@ impl TwriteMessage {
     /// Returns the number of bytes written, or an error
     pub fn send_twrite(&self) -> Result<u32, TwriteError> {
         // Create a buffer for the serialized message
-        let mut buf = [0u8; 1024]; // Large enough for Twrite message with data
+        // Need to fit MAX_9P_IO_CHUNK (8000) + overhead (23 bytes) = 8023 bytes minimum
+        // Using 8192 to match P9_DEFAULT_MSIZE
+        let mut buf = [0u8; 8192];
 
         // Serialize the message
         let bytes_written = self.serialize(&mut buf)?;
