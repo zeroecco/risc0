@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use risc0_zkp::core::digest::Digest;
 
 use super::{ProverServer, keccak::prove_keccak};
 use crate::{
@@ -275,7 +276,7 @@ impl ProverServer for ProverImpl {
         Ok(PreflightResults {
             inner,
             terminate_state: segment.inner.terminate_state,
-            output: segment.output.clone(),
+            output_digest: segment.inner.output_digest,
             segment_index: segment.index,
         })
     }
@@ -298,7 +299,7 @@ impl ProverServer for ProverImpl {
         let seal =
             risc0_circuit_rv32im::prove::segment_prover()?.prove_core(preflight_results.inner)?;
         let mut claim = ReceiptClaim::decode_from_seal_v2(&seal, Some(po2))?;
-        claim.output = preflight_results.output.into();
+        claim.output = MaybePruned::Pruned(preflight_results.output_digest.unwrap_or(Digest::ZERO));
 
         let verifier_parameters = ctx
             .segment_verifier_parameters

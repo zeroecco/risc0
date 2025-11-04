@@ -173,7 +173,7 @@ impl ProverServer for DevModeProver {
     ) -> Result<ProveInfo> {
         let session = ExecutorImpl::from_elf(env, elf)
             .unwrap()
-            .run_with_callback(null_callback)?;
+            .run_with_segment_callback(null_callback)?;
         self.prove_session(ctx, &session)
     }
 
@@ -187,7 +187,7 @@ impl ProverServer for DevModeProver {
         Ok(PreflightResults {
             inner: Default::default(),
             terminate_state: segment.inner.terminate_state,
-            output: segment.output.clone(),
+            output_digest: segment.inner.output_digest,
             segment_index: segment.index,
         })
     }

@@ -48,7 +48,7 @@ pub struct Session {
     /// an [ExitCode] of [Halted](ExitCode::Halted), [Paused](ExitCode::Paused),
     /// or [SessionLimit](ExitCode::SessionLimit), and all other [Segment]s (if
     /// any) will have [ExitCode::SystemSplit].
-    pub segments: Vec<Box<dyn SegmentRef>>,
+    pub segments: Vec<Box<dyn SegmentRef + Send + Sync>>,
 
     /// The input digest.
     pub input: Digest,
@@ -106,6 +106,8 @@ pub struct Session {
     pub(crate) execution_time: Duration,
 }
 
+// TODO(victor/perf): This Segment type can probably be collapsted with the circuit version it
+// contains.
 /// The execution trace of a portion of a program.
 ///
 /// The record of memory transactions of an execution that starts from an
@@ -120,8 +122,6 @@ pub struct Segment {
     pub index: u32,
 
     pub(crate) inner: risc0_circuit_rv32im::execute::Segment,
-
-    pub(crate) output: Option<Output>,
 }
 
 impl Segment {
@@ -150,7 +150,7 @@ pub struct PreflightResults {
     pub(crate) inner: risc0_circuit_rv32im::prove::PreflightResults,
 
     pub(crate) terminate_state: Option<TerminateState>,
-    pub(crate) output: Option<Output>,
+    pub(crate) output_digest: Option<Digest>,
     pub(crate) segment_index: u32,
 }
 
@@ -331,7 +331,7 @@ impl SegmentRef for NullSegmentRef {
     }
 }
 
-pub fn null_callback(_: Segment) -> Result<Box<dyn SegmentRef>> {
+pub fn null_callback(_: Segment) -> Result<Box<dyn SegmentRef + Send + Sync>> {
     Ok(Box::new(NullSegmentRef))
 }
 

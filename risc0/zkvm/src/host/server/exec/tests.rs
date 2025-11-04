@@ -50,7 +50,7 @@ use crate::{
 fn execute_elf(env: ExecutorEnv, elf: &[u8]) -> Result<Session> {
     let session = ExecutorImpl::from_elf(env, elf)
         .unwrap()
-        .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))?;
+        .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))?;
     session.log();
     Ok(session)
 }
@@ -98,7 +98,7 @@ fn basic() {
 
     let mut exec = ExecutorImpl::new(env, image).unwrap();
     let session = exec
-        .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
+        .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
         .unwrap();
     assert_eq!(session.exit_code, ExitCode::Halted(0));
     let segment = session.segments.first().unwrap().resolve().unwrap();
@@ -128,7 +128,7 @@ fn system_split_v2() {
         .unwrap();
     let mut exec = ExecutorImpl::new(env, image).unwrap();
     let session = exec
-        .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
+        .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
         .unwrap();
     assert_eq!(session.exit_code, ExitCode::Halted(0));
     let segments: Vec<_> = session
