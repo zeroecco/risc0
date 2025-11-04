@@ -28,12 +28,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Assumption, AssumptionReceipt, Assumptions, ExitCode, Journal, MaybePruned, Output,
     ReceiptClaim, SegmentInfo, Work,
+    claim::merge::Merge,
     host::{
         client::env::{ProveKeccakRequest, SegmentPath},
         prove_info::{SessionStats, SyscallKind, SyscallMetric},
     },
     mmr::{GuestPeak, MerkleMountainAccumulator},
-    sha::Digest,
+    sha::{Digest, Digestible},
 };
 
 /// The execution trace of a program.
@@ -122,6 +123,7 @@ pub struct Segment {
     pub index: u32,
 
     pub(crate) inner: risc0_circuit_rv32im::execute::Segment,
+    pub(crate) output: MaybePruned<Option<Output>>,
 }
 
 impl Segment {
@@ -150,7 +152,7 @@ pub struct PreflightResults {
     pub(crate) inner: risc0_circuit_rv32im::prove::PreflightResults,
 
     pub(crate) terminate_state: Option<TerminateState>,
-    pub(crate) output_digest: Option<Digest>,
+    pub(crate) output: MaybePruned<Option<Output>>,
     pub(crate) segment_index: u32,
 }
 
@@ -316,6 +318,40 @@ impl Session {
                 .collect(),
             execution_time: Some(self.execution_time),
         }
+    }
+
+    /// Iterate over the [SegmentRef] held in this session, resolve them, and yield the [Segment].
+    /// The populated [Output] is merged into the last segment, including journal and assumptions.
+    pub fn segments(&self) -> impl Iterator<Item = Result<Segment>> {
+        // Construct the populated Output from the session's journal and assumptions.
+        let (assumptions, _): (Vec<_>, Vec<_>) = self.assumptions.iter().cloned().unzip();
+        let output: MaybePruned<Option<Output>> = self
+            .journal
+            .as_ref()
+            .map(|journal| Output {
+                journal: MaybePruned::Pruned(journal.digest()),
+                assumptions: assumptions.into(),
+            })
+            .into();
+
+        let (last_segment_ref, segment_refs) = match self.segments.split_last() {
+            Some((last, rest)) => (Some(last), rest),
+            None => (None, [].as_slice()),
+        };
+
+        segment_refs
+            .iter()
+            .map(|segment_ref| segment_ref.resolve())
+            .chain(last_segment_ref.into_iter().map(move |last_segment_ref| {
+                let mut last_segment = last_segment_ref.resolve()?;
+
+                last_segment
+                    .output
+                    .merge_with(&output)
+                    .context("failed to merge output into final segment claim")?;
+
+                Ok(last_segment)
+            }))
     }
 }
 

@@ -43,7 +43,7 @@ use risc0_zkvm_platform::{align_up, fileno};
 use tempfile::tempdir;
 
 use crate::{
-    ExecutorEnv, FileSegmentRef, Segment, SegmentRef,
+    ExecutorEnv, FileSegmentRef, MaybePruned, Segment, SegmentRef,
     claim::receipt::exit_code_from_terminate_state,
     host::{client::env::SegmentPath, server::session::Session},
 };
@@ -141,8 +141,12 @@ where
                     .context("Failed to apply segment update to memory image")?;
 
                 // TODO(victor/perf): Support dumping the Segment here?
+
                 let segment = Segment {
                     index: circuit_segment.index.try_into().unwrap(),
+                    output: MaybePruned::Pruned(
+                        circuit_segment.output_digest.unwrap_or(Digest::ZERO),
+                    ),
                     inner: circuit_segment,
                 };
                 let segment_ref =
