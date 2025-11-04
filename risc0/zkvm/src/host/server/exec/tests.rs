@@ -104,7 +104,7 @@ fn basic() {
     let segment = session.segments.first().unwrap().resolve().unwrap();
 
     assert_eq!(session.segments.len(), 1);
-    let segment_claim = segment.inner.execute().unwrap().claim;
+    let segment_claim = segment.inner.execute().unwrap().claim();
     assert_eq!(segment_claim.pre_state, pre_image_id);
     assert_ne!(segment_claim.post_state, Digest::ZERO);
     assert_eq!(segment.inner.input_digest, Digest::ZERO);
@@ -139,14 +139,14 @@ fn system_split_v2() {
 
     assert_eq!(segments.len(), 2);
 
-    let segment0_claim = segments[0].inner.execute().unwrap().claim;
+    let segment0_claim = segments[0].inner.execute().unwrap().claim();
     assert_eq!(segment0_claim.pre_state, pre_image_id);
     assert_ne!(segment0_claim.post_state, pre_image_id);
     assert_eq!(segments[0].inner.input_digest, Digest::ZERO);
     assert_eq!(segments[0].inner.output_digest, None);
     assert_eq!(segments[0].inner.terminate_state, None);
 
-    let segment1_claim = segments[1].inner.execute().unwrap().claim;
+    let segment1_claim = segments[1].inner.execute().unwrap().claim();
     assert_eq!(segment1_claim.pre_state, segment0_claim.post_state);
     assert_ne!(segment1_claim.post_state, segment1_claim.pre_state);
     assert_eq!(segments[1].inner.input_digest, Digest::ZERO);
@@ -1159,7 +1159,7 @@ fn post_state_digest_randomization() {
             // zero-out the post-state digest, and so it will be zero after compression.
             let session = execute_elf(ExecutorEnv::default(), HELLO_COMMIT_ELF).unwrap();
             let segment = session.segments.last().unwrap().resolve().unwrap();
-            segment.inner.execute().unwrap().claim.post_state
+            segment.inner.execute().unwrap().claim().post_state
         })
         .collect();
     assert_eq!(post_state_digests.len(), ITERATIONS);
@@ -1191,7 +1191,7 @@ fn post_state_digest_randomization() {
             exec.syscall_table.with_syscall(SYS_RANDOM, RiggedRandom);
             let session = exec.run().unwrap();
             let segment = session.segments.last().unwrap().resolve().unwrap();
-            segment.inner.execute().unwrap().claim.post_state
+            segment.inner.execute().unwrap().claim().post_state
         })
         .collect();
     assert_eq!(post_state_digests.len(), 1);

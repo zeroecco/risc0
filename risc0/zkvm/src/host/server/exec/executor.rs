@@ -312,8 +312,7 @@ impl<'a> ExecutorImpl<'a> {
                 segment_update_callback,
             )?;
             anyhow::Ok((exec_result, recv))
-        })
-        .context("Execution failed")?;
+        })?;
         let refs = recv.iter().collect::<Vec<_>>();
         let elapsed = start_time.elapsed();
 
