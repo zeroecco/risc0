@@ -300,6 +300,10 @@ impl<'a> ExecutorImpl<'a> {
             None => CycleLimit::None,
         };
 
+        // Update digests in the image before cloning and for the executor. Such that the initial
+        // ipage hashes only ever need to be computed once.
+        self.image.update_digests();
+
         let mut exec = Executor::new(
             self.image.clone(),
             self,
@@ -347,7 +351,6 @@ impl<'a> ExecutorImpl<'a> {
             std::fs::write(self.env.pprof_out.as_ref().unwrap(), report)?;
         }
 
-        // TODO(victor/perf): Right now, this is computed here. Figure out how to avoid this.
         let pre_image_digest = self.image.image_id();
         self.image = exec_result.post_image.clone();
         let syscall_metrics = self.syscall_table.metrics.borrow().clone();
