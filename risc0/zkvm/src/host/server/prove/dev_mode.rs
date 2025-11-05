@@ -27,10 +27,7 @@ use crate::{
         Unknown,
         receipt::{UnionClaim, exit_code_from_terminate_state},
     },
-    host::{
-        prove_info::ProveInfo,
-        server::{exec::executor::ExecutorImpl, session::null_callback},
-    },
+    host::{prove_info::ProveInfo, server::exec::executor::ExecutorImpl},
     receipt::{FakeReceipt, InnerReceipt, SegmentReceipt, SuccinctReceipt},
     recursion::MerkleProof,
     sha::Digestible as _,
@@ -173,7 +170,7 @@ impl ProverServer for DevModeProver {
     ) -> Result<ProveInfo> {
         let session = ExecutorImpl::from_elf(env, elf)
             .unwrap()
-            .run_with_callback(null_callback)?;
+            .run_with_segment_update_callback(|_| Ok(()))?;
         self.prove_session(ctx, &session)
     }
 

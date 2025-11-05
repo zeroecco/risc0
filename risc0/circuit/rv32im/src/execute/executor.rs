@@ -149,12 +149,12 @@ pub struct SegmentUpdate {
 
     /// Count of "user cycles", the cycles directly associated with instructions executed by the
     /// user guest program, before suspend in this segment. Does not include paging costs.
-    user_cycles: u32,
+    pub user_cycles: u32,
     /// Count of cycles associated with memory paging (i.e. page-in and page-out operations).
     pager_cycles: u32,
     segment_threshold: u32,
     /// Power-of-two for the segment size required to prove this segment.
-    po2: u32,
+    pub po2: u32,
     /// Index of the segment in the session.
     index: u64,
     /// Gloablly unique nonce used within the proof of verifiable work system.
