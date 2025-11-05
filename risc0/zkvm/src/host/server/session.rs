@@ -49,7 +49,7 @@ pub struct Session {
     /// an [ExitCode] of [Halted](ExitCode::Halted), [Paused](ExitCode::Paused),
     /// or [SessionLimit](ExitCode::SessionLimit), and all other [Segment]s (if
     /// any) will have [ExitCode::SystemSplit].
-    pub segments: Vec<Box<dyn SegmentRef + Send + Sync>>,
+    pub segments: Vec<Box<dyn SegmentRef>>,
 
     /// The input digest.
     pub input: Digest,
@@ -107,8 +107,6 @@ pub struct Session {
     pub(crate) execution_time: Duration,
 }
 
-// TODO(victor/perf): This Segment type can probably be collapsted with the circuit version it
-// contains.
 /// The execution trace of a portion of a program.
 ///
 /// The record of memory transactions of an execution that starts from an

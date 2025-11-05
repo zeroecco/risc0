@@ -24,7 +24,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use risc0_binfmt::{
     AbiKind, ByteAddr, ExitCode, MemoryImage, Program, ProgramBinary, ProgramBinaryHeader,
     SystemState,
@@ -98,16 +98,14 @@ pub(crate) fn circuit_version() -> u32 {
 /// Maximum number of segments we can queue up before we block execution
 const MAX_OUTSTANDING_SEGMENTS: usize = 5;
 
-type SegmentRefBox = Box<dyn SegmentRef + Send + Sync>;
-
 struct ExecutorImplCallbackFactory<'scope, 'env, F> {
     inner: F,
-    segment_ref_channel: Sender<SegmentRefBox>,
+    segment_ref_channel: Sender<Box<dyn SegmentRef>>,
     scope: &'scope Scope<'scope, 'env>,
 }
 
 impl<'scope, 'env, F> ExecutorImplCallbackFactory<'scope, 'env, F> {
-    fn new(scope: &'scope Scope<'scope, 'env>, inner: F) -> (Self, Receiver<SegmentRefBox>) {
+    fn new(scope: &'scope Scope<'scope, 'env>, inner: F) -> (Self, Receiver<Box<dyn SegmentRef>>) {
         let (send, recv) = mpsc::channel();
         let factory = Self {
             inner,
@@ -122,7 +120,7 @@ impl<'scope, 'env, F> ExecutorImplCallbackFactory<'scope, 'env, F> {
 // between threads. Should I bother?
 impl<'scope, F> SegmentUpdateCallbackFactory for ExecutorImplCallbackFactory<'scope, '_, F>
 where
-    F: FnMut(Segment) -> Result<SegmentRefBox> + Send + 'scope,
+    F: FnMut(Segment) -> Result<Box<dyn SegmentRef>> + Send + 'scope,
 {
     type Callback = ExecutorImplCallback;
 
@@ -154,7 +152,7 @@ where
 
                 self.segment_ref_channel
                     .send(segment_ref)
-                    .context("Failed to send segment ref")?;
+                    .map_err(|err| anyhow!("Failed to send segment ref: {err:?}"))?;
 
                 // Update the digests in the working image. This ensures that all digests are
                 // populated in the produced Segment and the receiver does not need to hash.
@@ -269,7 +267,7 @@ impl<'a> ExecutorImpl<'a> {
     /// [crate::ExitCode::Paused] is reached, producing a [Session] as a result.
     pub fn run_with_callback<F>(&mut self, callback: F) -> Result<Session>
     where
-        F: FnMut(Segment) -> Result<SegmentRefBox> + Send,
+        F: FnMut(Segment) -> Result<Box<dyn SegmentRef>> + Send,
     {
         let (session, recv) = thread::scope(|scope| {
             let (segment_update_callback, recv) = ExecutorImplCallbackFactory::new(scope, callback);
@@ -367,7 +365,7 @@ impl<'a> ExecutorImpl<'a> {
         let session = Session {
             // TODO(victor/perf): Is there a better way to solve the issue of this field?
             segments: (0..exec_result.segments)
-                .map(|_| -> SegmentRefBox { Box::new(NullSegmentRef) })
+                .map(|_| -> Box<dyn SegmentRef> { Box::new(NullSegmentRef) })
                 .collect(),
             input: self.env.input_digest.unwrap_or_default(),
             journal: session_journal.map(crate::Journal::new),

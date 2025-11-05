@@ -19,7 +19,7 @@ use risc0_circuit_rv32im::execute::SegmentUpdate;
 use super::{Executor, Prover, ProverOpts};
 use crate::{
     ExecutorEnv, ProveInfo, Receipt, SegmentInfo, SessionInfo, VerifierContext, get_prover_server,
-    host::server::{exec::executor::ExecutorImpl, session::NullSegmentRef},
+    host::server::exec::executor::ExecutorImpl,
 };
 
 /// A [Prover] implementation that selects a [ProverServer][crate::ProverServer] by calling
