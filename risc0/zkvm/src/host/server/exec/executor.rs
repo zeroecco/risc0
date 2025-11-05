@@ -43,7 +43,7 @@ use risc0_zkvm_platform::{align_up, fileno};
 use tempfile::tempdir;
 
 use crate::{
-    ExecutorEnv, FileSegmentRef, MaybePruned, Segment, SegmentRef,
+    ExecutorEnv, FileSegmentRef, MaybePruned, NullSegmentRef, Segment, SegmentRef,
     claim::receipt::exit_code_from_terminate_state,
     host::{client::env::SegmentPath, server::session::Session},
 };
@@ -250,9 +250,7 @@ impl<'a> ExecutorImpl<'a> {
         }
 
         let path = self.env.segment_path.clone().unwrap();
-        self.run_with_segment_callback(|segment| {
-            Ok(Box::new(FileSegmentRef::new(&segment, &path)?))
-        })
+        self.run_with_callback(|segment| Ok(Box::new(FileSegmentRef::new(&segment, &path)?)))
     }
 
     /// This will run the executor with a gdb server so gdb can be attached.
@@ -273,6 +271,21 @@ impl<'a> ExecutorImpl<'a> {
     where
         F: FnMut(Segment) -> Result<SegmentRefBox> + Send,
     {
+        let (session, recv) = thread::scope(|scope| {
+            let (segment_update_callback, recv) = ExecutorImplCallbackFactory::new(scope, callback);
+            let session = self.run_with_segment_update_callback(segment_update_callback)?;
+            anyhow::Ok((session, recv))
+        })?;
+        Ok(Session {
+            segments: recv.iter().collect(),
+            ..session
+        })
+    }
+
+    pub(crate) fn run_with_segment_update_callback(
+        &mut self,
+        callback: impl SegmentUpdateCallbackFactory,
+    ) -> Result<Session> {
         scope!("execute");
 
         let journal = Journal::default();
@@ -307,25 +320,15 @@ impl<'a> ExecutorImpl<'a> {
         };
 
         let start_time = Instant::now();
-        let (result, recv) = thread::scope(|scope| {
-            let (segment_update_callback, recv) = ExecutorImplCallbackFactory::new(scope, callback);
-            let exec_result = exec.run(
-                segment_limit_po2,
-                max_insn_cycles,
-                session_limit,
-                segment_update_callback,
-            )?;
-            anyhow::Ok((exec_result, recv))
-        })?;
-        let refs = recv.iter().collect::<Vec<_>>();
+        let exec_result = exec.run(segment_limit_po2, max_insn_cycles, session_limit, callback)?;
         let elapsed = start_time.elapsed();
 
-        tracing::debug!("output_digest: {:?}", result.output);
+        tracing::debug!("output_digest: {:?}", exec_result.output);
 
-        let exit_code = exit_code_from_terminate_state(&result.terminate_state)?;
+        let exit_code = exit_code_from_terminate_state(&exec_result.terminate_state)?;
 
         // Set the session_journal to the committed data iff the guest set a non-zero output.
-        let session_journal = result.output.and_then(|digest| {
+        let session_journal = exec_result.output.and_then(|digest| {
             (digest != Digest::ZERO).then(|| std::mem::take(&mut *journal.buf.lock().unwrap()))
         });
         if !exit_code.expects_output() && session_journal.is_some() {
@@ -348,9 +351,9 @@ impl<'a> ExecutorImpl<'a> {
             std::fs::write(self.env.pprof_out.as_ref().unwrap(), report)?;
         }
 
-        // TODO(victor/perf): Right now, this is computed hgere. Figure out how to avoid this.
+        // TODO(victor/perf): Right now, this is computed here. Figure out how to avoid this.
         let pre_image_digest = self.image.image_id();
-        self.image = result.post_image.clone();
+        self.image = exec_result.post_image.clone();
         let syscall_metrics = self.syscall_table.metrics.borrow().clone();
 
         // NOTE: When a segment ends in a Halted(_) state, the post_digest will be null.
@@ -362,16 +365,19 @@ impl<'a> ExecutorImpl<'a> {
         };
 
         let session = Session {
-            segments: refs,
+            // TODO(victor/perf): Is there a better way to solve the issue of this field?
+            segments: (0..exec_result.segments)
+                .map(|_| -> SegmentRefBox { Box::new(NullSegmentRef) })
+                .collect(),
             input: self.env.input_digest.unwrap_or_default(),
             journal: session_journal.map(crate::Journal::new),
             exit_code,
             assumptions,
             mmr_assumptions,
-            user_cycles: result.user_cycles,
-            paging_cycles: result.paging_cycles,
-            reserved_cycles: result.reserved_cycles,
-            total_cycles: result.total_cycles,
+            user_cycles: exec_result.user_cycles,
+            paging_cycles: exec_result.paging_cycles,
+            reserved_cycles: exec_result.reserved_cycles,
+            total_cycles: exec_result.total_cycles,
             pre_state: SystemState {
                 pc: 0,
                 merkle_root: pre_image_digest,

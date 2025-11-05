@@ -358,7 +358,7 @@ impl Session {
 /// Implementation of a [SegmentRef] that does not save the segment.
 ///
 /// This is useful for DevMode where the segments aren't needed.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct NullSegmentRef;
 
 impl SegmentRef for NullSegmentRef {
