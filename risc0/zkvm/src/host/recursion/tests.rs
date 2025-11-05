@@ -132,7 +132,7 @@ fn shorts_to_digest(elems: &[BabyBearElem]) -> Digest {
 fn execute_elf(env: ExecutorEnv, elf: &[u8]) -> Result<Session> {
     ExecutorImpl::from_elf(env, elf)
         .unwrap()
-        .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
+        .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
 }
 
 fn prove_segments(session: &Session) -> Result<Vec<SegmentReceipt>> {

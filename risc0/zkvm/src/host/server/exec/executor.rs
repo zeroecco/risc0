@@ -269,7 +269,7 @@ impl<'a> ExecutorImpl<'a> {
 
     /// Run the executor until [crate::ExitCode::Halted] or
     /// [crate::ExitCode::Paused] is reached, producing a [Session] as a result.
-    pub fn run_with_segment_callback<F>(&mut self, callback: F) -> Result<Session>
+    pub fn run_with_callback<F>(&mut self, callback: F) -> Result<Session>
     where
         F: FnMut(Segment) -> Result<SegmentRefBox> + Send,
     {

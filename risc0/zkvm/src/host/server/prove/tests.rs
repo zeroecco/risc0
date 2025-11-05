@@ -76,7 +76,7 @@ fn prove_nothing_groth16() -> ProveInfo {
 fn execute_elf(env: ExecutorEnv, elf: &[u8]) -> Result<Session> {
     ExecutorImpl::from_elf(env, elf)
         .unwrap()
-        .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
+        .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
 }
 
 fn prove_session(session: &Session) -> Result<Receipt> {
@@ -372,7 +372,7 @@ mod riscv {
     fn prove_elf(env: ExecutorEnv, elf: &[u8]) -> Result<Receipt> {
         let session = ExecutorImpl::from_kernel_elf(env, elf)
             .unwrap()
-            .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))?;
+            .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))?;
         prove_session(&session)
     }
 

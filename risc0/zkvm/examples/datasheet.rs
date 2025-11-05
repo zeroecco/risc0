@@ -124,7 +124,7 @@ fn po2_in_range(s: &str) -> Result<usize, String> {
 fn execute_elf(env: ExecutorEnv, elf: &[u8]) -> anyhow::Result<Session> {
     ExecutorImpl::from_elf(env, elf)
         .unwrap()
-        .run_with_segment_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
+        .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))
 }
 
 #[derive(Eq, PartialEq, Subcommand, Sequence)]

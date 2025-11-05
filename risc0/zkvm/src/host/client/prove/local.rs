@@ -61,7 +61,7 @@ impl Executor for LocalProver {
         let mut segments = Vec::new();
         let session = ExecutorImpl::from_elf(env, elf)
             .unwrap()
-            .run_with_segment_callback(|segment| {
+            .run_with_callback(|segment| {
                 segments.push(segment.get_info());
                 Ok(Box::new(NullSegmentRef))
             })?;
