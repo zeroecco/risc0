@@ -116,8 +116,6 @@ impl<'scope, 'env, F> ExecutorImplCallbackFactory<'scope, 'env, F> {
     }
 }
 
-// TODO(victor/perf): With some futzery, it should be possible to avoid sending the dyn SegmentRef
-// between threads. Should I bother?
 impl<'scope, F> SegmentUpdateCallbackFactory for ExecutorImplCallbackFactory<'scope, '_, F>
 where
     F: FnMut(Segment) -> Result<Box<dyn SegmentRef>> + Send + 'scope,
@@ -363,7 +361,7 @@ impl<'a> ExecutorImpl<'a> {
         };
 
         let session = Session {
-            // TODO(victor/perf): Is there a better way to solve the issue of this field?
+            // TODO(victor/perf): Is there a better way to solve the issue of filling this field?
             segments: (0..exec_result.segments)
                 .map(|_| -> Box<dyn SegmentRef> { Box::new(NullSegmentRef) })
                 .collect(),
