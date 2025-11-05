@@ -175,9 +175,6 @@ impl SegmentUpdate {
     /// This function does not guarantee an update the node digests in the [MemoryImage] Merkle
     /// tree. To ensure that the digests are up to date, call [MemoryImage::update_digests].
     pub fn apply_to(&self, memory_image: &mut MemoryImage) -> Result<()> {
-        // TODO(victor/perf): Check that this clone does not introduce a performance penalty. If
-        // inlined, it should be possible to determine that this does not require an actual clone
-        // (which is a clone of an Arc).
         for (idx, page) in self.update_partial_image.pages.iter() {
             memory_image.set_page(*idx, page.clone());
         }
