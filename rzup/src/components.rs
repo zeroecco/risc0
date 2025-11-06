@@ -98,6 +98,7 @@ impl Component {
             },
             Component::CppToolchain => match (platform.arch, platform.os) {
                 ("x86_64", Os::Linux) => ("riscv32im-linux-x86_64".to_string(), "tar.xz"),
+                ("aarch64", Os::Linux) => ("riscv32im-linux-aarch64".to_string(), "tar.xz"),
                 ("aarch64", Os::MacOs) => ("riscv32im-osx-arm64".to_string(), "tar.xz"),
                 (other, os) => {
                     return Err(RzupError::UnsupportedPlatform(format!(

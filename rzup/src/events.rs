@@ -64,6 +64,20 @@ pub enum RzupEvent {
     DoneBuildingRustToolchain {
         version: String,
     },
+    BuildingCppToolchain,
+    BuildingCppToolchainUpdate {
+        message: String,
+    },
+    DoneBuildingCppToolchain {
+        version: String,
+    },
+    BuildingGroth16Toolchain,
+    BuildingGroth16ToolchainUpdate {
+        message: String,
+    },
+    DoneBuildingGroth16Toolchain {
+        version: String,
+    },
     CheckUpdates {
         id: Option<String>, // none means finished checking
     },

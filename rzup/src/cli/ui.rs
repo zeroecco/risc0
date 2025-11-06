@@ -78,6 +78,20 @@ impl TerminalUi {
                 RzupEvent::DoneBuildingRustToolchain { version } => {
                     self.handle_done_building_rust_toolchain(version)
                 }
+                RzupEvent::BuildingCppToolchain => self.handle_building_cpp_toolchain(),
+                RzupEvent::BuildingCppToolchainUpdate { message } => {
+                    self.handle_building_cpp_toolchain_update(message)
+                }
+                RzupEvent::DoneBuildingCppToolchain { version } => {
+                    self.handle_done_building_cpp_toolchain(version)
+                }
+                RzupEvent::BuildingGroth16Toolchain => self.handle_building_groth16_toolchain(),
+                RzupEvent::BuildingGroth16ToolchainUpdate { message } => {
+                    self.handle_building_groth16_toolchain_update(message)
+                }
+                RzupEvent::DoneBuildingGroth16Toolchain { version } => {
+                    self.handle_done_building_groth16_toolchain(version)
+                }
             }
         }
     }
@@ -173,6 +187,32 @@ impl TerminalUi {
 
     fn handle_done_building_rust_toolchain(&mut self, version: String) {
         self.complete_progress(&format!("✓ Built Rust toolchain version {version}"));
+    }
+
+    fn handle_building_cpp_toolchain(&mut self) {
+        self.start_progress("Building C++ toolchain".into());
+    }
+
+    fn handle_building_cpp_toolchain_update(&mut self, message: String) {
+        self.status
+            .set_message(format!("Building C++ toolchain: {message}"));
+    }
+
+    fn handle_done_building_cpp_toolchain(&mut self, version: String) {
+        self.complete_progress(&format!("✓ Built C++ toolchain version {version}"));
+    }
+
+    fn handle_building_groth16_toolchain(&mut self) {
+        self.start_progress("Building Groth16 toolchain".into());
+    }
+
+    fn handle_building_groth16_toolchain_update(&mut self, message: String) {
+        self.status
+            .set_message(format!("Building Groth16 toolchain: {message}"));
+    }
+
+    fn handle_done_building_groth16_toolchain(&mut self, version: String) {
+        self.complete_progress(&format!("✓ Built Groth16 toolchain version {version}"));
     }
 
     fn handle_install(&mut self, id: String, version: String) {
@@ -274,6 +314,20 @@ impl TextUi {
                 RzupEvent::DoneBuildingRustToolchain { version } => {
                     self.handle_done_building_rust_toolchain(version)
                 }
+                RzupEvent::BuildingCppToolchain => self.handle_building_cpp_toolchain(),
+                RzupEvent::BuildingCppToolchainUpdate { message } => {
+                    self.handle_building_cpp_toolchain_update(message)
+                }
+                RzupEvent::DoneBuildingCppToolchain { version } => {
+                    self.handle_done_building_cpp_toolchain(version)
+                }
+                RzupEvent::BuildingGroth16Toolchain => self.handle_building_groth16_toolchain(),
+                RzupEvent::BuildingGroth16ToolchainUpdate { message } => {
+                    self.handle_building_groth16_toolchain_update(message)
+                }
+                RzupEvent::DoneBuildingGroth16Toolchain { version } => {
+                    self.handle_done_building_groth16_toolchain(version)
+                }
             }
         }
     }
@@ -337,6 +391,30 @@ impl TextUi {
 
     fn handle_done_building_rust_toolchain(&mut self, version: String) {
         println!("✓ Built Rust toolchain version {version}");
+    }
+
+    fn handle_building_cpp_toolchain(&mut self) {
+        println!("Building C++ toolchain");
+    }
+
+    fn handle_building_cpp_toolchain_update(&mut self, message: String) {
+        println!("{message}");
+    }
+
+    fn handle_done_building_cpp_toolchain(&mut self, version: String) {
+        println!("✓ Built C++ toolchain version {version}");
+    }
+
+    fn handle_building_groth16_toolchain(&mut self) {
+        println!("Building Groth16 toolchain");
+    }
+
+    fn handle_building_groth16_toolchain_update(&mut self, message: String) {
+        println!("{message}");
+    }
+
+    fn handle_done_building_groth16_toolchain(&mut self, version: String) {
+        println!("✓ Built Groth16 toolchain version {version}");
     }
 
     fn handle_install(&mut self, id: String, version: String) {

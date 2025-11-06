@@ -22,12 +22,12 @@ rzup install [OPTIONS] [NAME] [VERSION]
 
 Arguments:
 
-- `NAME`: (Optional) component name to install (e.g., "rust", "cargo-risczero")
-- `VERSION`: (Optional) Version to install. If no version is specified, it will use the latest release version.
+* `NAME`: (Optional) component name to install (e.g., "rust", "cargo-risczero")
+* `VERSION`: (Optional) Version to install. If no version is specified, it will use the latest release version.
 
 Options:
 
-- `-f, --force`: Force reinstallation even if already installed
+* `-f, --force`: Force reinstallation even if already installed
 
 Examples:
 
@@ -51,7 +51,7 @@ Update your RISC Zero installation.
 rzup update
 ```
 
-_Note:_ `update` is an alias to `install`.
+*Note:* `update` is an alias to `install`.
 
 ### Check
 
@@ -71,8 +71,8 @@ rzup use <NAME> <VERSION>
 
 Arguments:
 
-- `NAME`: Component name (required)
-- `VERSION`: Version to activate (required)
+* `NAME`: Component name (required)
+* `VERSION`: Version to activate (required)
 
 ### Show
 
@@ -105,8 +105,8 @@ rzup uninstall <NAME> <VERSION>
 
 Arguments:
 
-- `NAME`: Component name (required)
-- `VERSION`: Version to uninstall (required)
+* `NAME`: Component name (required)
+* `VERSION`: Version to uninstall (required)
 
 ### Build
 
@@ -116,39 +116,54 @@ Build a particular component from source.
 rzup build <NAME> <COMMIT-OR-TAG>
 ```
 
-Right now this command only supports building the Rust toolchain.
+Right now this command supports building the Rust toolchain and C++ toolchain.
 
 Downloads the source code for the given component from GitHub, builds it, installs it, and makes it
 the default version.
 
 The resulting version of the component will contain the commit hash.
 
+Examples:
+
+```sh
+# Build Rust toolchain from latest master
+rzup build rust --tag-or-commit master
+
+# Build C++ toolchain from specific tag
+rzup build cpp --tag-or-commit 2024.01.05
+
+# Build from local path
+rzup build cpp --path /path/to/local/toolchain
+```
+
+**Note:** Building C++ toolchains from source requires additional system dependencies. See the [RISC Zero toolchain repository](https://github.com/risc0/toolchain) for the complete list of prerequisites. For most users, it's recommended to use `rzup install cpp` to download pre-built toolchains instead.
+
 ## Components
 
 rzup manages the following components:
 
 1. **rust**: The RISC Zero Rust toolchain
-   - Rust compiler and tools optimized for the RISC Zero zkVM
+   * Rust compiler and tools optimized for the RISC Zero zkVM
 
 2. **cpp**: The RISC Zero C++ toolchain
-   - The C++ compiler and tools optimized for the RISC Zero zkVM
+   * The C++ compiler and tools optimized for the RISC Zero zkVM
 
 3. **cargo-risczero**: The RISC Zero Cargo extension
-   - Provides cargo subcommands for RISC Zero development
+   * Provides cargo subcommands for RISC Zero development
 
 4. **r0vm**: The RISC Zero zkVM
-    - Precompiled version of the RISC Zero zkVM
+   * Precompiled version of the RISC Zero zkVM
 
 ## Configuration
 
 rzup stores its installations in:
 
-- Default: Linux/macOS: `$HOME/.risc0/`
-- Custom: Set with the `RISC0_HOME` environment variable
+* Default: Linux/macOS: `$HOME/.risc0/`
+* Custom: Set with the `RISC0_HOME` environment variable
 
 When communicating with GitHub, it tries using authentication. This can be useful to get around
 rate-limiting. It attempts to get a token from the `GITHUB_TOKEN` environment variable, then from
-~/.config/gh/hosts.yml.
+\~/.config/gh/hosts.yml.
 
 ### publish
 
@@ -163,6 +178,7 @@ To publish an artifact as a component, first an artifact must be created. A vali
 .tar.xz file.
 
 To create an artifact, `publish create-artifact` can be used like
+
 ```bash
 rzup publish create-artifact --input <directory-path> --output <output>.tar.xz
 ```
@@ -173,6 +189,7 @@ command doesn't have to be used, but is provided for convenience.
 #### upload
 
 To upload an artifact to S3 as a component, `publish upload` can be used like
+
 ```bash
 rzup publish upload (--target-agnostic|--target <target-triple>) <component-name> <version> <artifact>.tar.xz
 ```
@@ -180,14 +197,14 @@ rzup publish upload (--target-agnostic|--target <target-triple>) <component-name
 This command must be run in an environment with AWS credentials available. It will publish the
 artifact as a component with the given name and version.
 
-If `--target-agnostic` flag is given, the artifact will be used for all targets, otherwise `--target
-<target-triple>` must be used to mark which target the artifact should be used for (e.g.
-aarch64-apple-darwin, or x86_64-unknown-linux-gnu)
+If `--target-agnostic` flag is given, the artifact will be used for all targets, otherwise `--target <target-triple>` must be used to mark which target the artifact should be used for (e.g.
+aarch64-apple-darwin, or x86\_64-unknown-linux-gnu)
 
 Uploads are signed with a private key that is stored in AWS secrets manager, the key is obtained at
 publish time using aforementioned AWS credentials.
 
 #### set-latest
+
 The published component metadata includes information about what component version is the latest
 version. (This is the version that rzup will download by default.) To update what this version is,
 the `set-latest` command can be used.

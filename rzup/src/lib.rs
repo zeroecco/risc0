@@ -343,6 +343,31 @@ impl Rzup {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "cli"), expect(dead_code))]
+    pub(crate) fn build_cpp_toolchain(
+        &mut self,
+        repo_url: &str,
+        tag_or_commit: &Option<String>,
+        path: &Option<String>,
+    ) -> Result<()> {
+        let version = build::build_cpp_toolchain(&self.environment, repo_url, tag_or_commit, path)?;
+        self.set_default_version(&Component::CppToolchain, version)?;
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "cli"), expect(dead_code))]
+    pub(crate) fn build_groth16_toolchain(
+        &mut self,
+        repo_url: &str,
+        tag_or_commit: &Option<String>,
+        path: &Option<String>,
+    ) -> Result<()> {
+        let version =
+            build::build_groth16_toolchain(&self.environment, repo_url, tag_or_commit, path)?;
+        self.set_default_version(&Component::Risc0Groth16, version)?;
+        Ok(())
+    }
+
     /// Upload a new version of a component to S3.
     ///
     /// If a component already exists for the given component + platform + version, an error is

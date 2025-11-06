@@ -24,7 +24,11 @@ use std::path::PathBuf;
 
 fn parser(cmd: &str) -> Vec<&'static str> {
     match cmd {
-        "build" => vec![Component::RustToolchain.as_str()],
+        "build" => vec![
+            Component::RustToolchain.as_str(),
+            Component::CppToolchain.as_str(),
+            Component::Risc0Groth16.as_str(),
+        ],
         "default" => Component::iter().map(|c| c.as_str()).collect(),
         _ => Component::iter()
             .map(|c| c.as_str())
@@ -272,7 +276,9 @@ pub const BUILD_HELP: &str = "Discussion:
     Builds and installs the given component.
 
     Grabs the source code from GitHub, compiles it, installs it, and makes it
-    the default version. The resulting component version contains the commit hash.";
+    the default version. The resulting component version contains the commit hash.
+
+    Supported components: rust, cpp, risc0-groth16";
 
 #[derive(Parser)]
 #[command(group(
@@ -297,15 +303,24 @@ pub(crate) struct BuildCommand {
 impl BuildCommand {
     pub(crate) fn execute(&self, rzup: &mut Rzup) -> Result<()> {
         let component: Component = self.name.parse()?;
-        if component != Component::RustToolchain {
-            return Err(RzupError::Other(format!("cannot build {component}")));
+        match component {
+            Component::RustToolchain => rzup.build_rust_toolchain(
+                "https://github.com/risc0/rust.git",
+                &self.tag_or_commit,
+                &self.path,
+            ),
+            Component::CppToolchain => rzup.build_cpp_toolchain(
+                "https://github.com/risc0/toolchain.git",
+                &self.tag_or_commit,
+                &self.path,
+            ),
+            Component::Risc0Groth16 => rzup.build_groth16_toolchain(
+                "https://github.com/risc0/risc0.git",
+                &self.tag_or_commit,
+                &self.path,
+            ),
+            _ => Err(RzupError::Other(format!("cannot build {component}"))),
         }
-
-        rzup.build_rust_toolchain(
-            "https://github.com/risc0/rust.git",
-            &self.tag_or_commit,
-            &self.path,
-        )
     }
 }
 
