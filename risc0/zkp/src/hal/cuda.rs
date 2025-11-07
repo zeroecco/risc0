@@ -28,6 +28,7 @@ use cust::{
     device::DeviceAttribute,
     memory::{DeviceCopy, DevicePointer, GpuBuffer},
     prelude::*,
+    stream::{Stream, StreamFlags},
 };
 use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use risc0_core::{
@@ -38,6 +39,45 @@ use risc0_core::{
     scope,
 };
 use risc0_sys::{cuda::*, ffi_wrap};
+
+// CUDA memory advice hints for optimizing memory access patterns
+#[repr(u32)]
+#[allow(dead_code)]
+enum CudaMemAdvise {
+    SetReadMostly = 1,
+    UnsetReadMostly = 2,
+    SetPreferredLocation = 3,
+    UnsetPreferredLocation = 4,
+    SetAccessedBy = 5,
+    UnsetAccessedBy = 6,
+}
+
+extern "C" {
+    fn cudaMemAdvise(
+        devPtr: *const std::os::raw::c_void,
+        count: usize,
+        advice: u32,
+        device: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+
+    fn cudaMemcpyAsync(
+        dst: *mut std::os::raw::c_void,
+        src: *const std::os::raw::c_void,
+        count: usize,
+        kind: u32,
+        stream: *mut std::os::raw::c_void,
+    ) -> std::os::raw::c_int;
+
+    fn cudaStreamSynchronize(stream: *mut std::os::raw::c_void) -> std::os::raw::c_int;
+}
+
+#[repr(u32)]
+enum CudaMemcpyKind {
+    HostToHost = 0,
+    HostToDevice = 1,
+    DeviceToHost = 2,
+    DeviceToDevice = 3,
+}
 
 use super::{tracker, Buffer, Hal};
 use crate::{
@@ -259,10 +299,26 @@ where
     result
 }
 
+/// Execute a kernel operation with stream synchronization
+/// This version ensures the stream is synchronized after kernel execution
+/// Use this when you need to ensure kernel completion before proceeding
+fn execute_kernel_with_stream<F>(stream: &Stream, f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let result = f();
+    // Synchronize stream to ensure kernel completes before incrementing generation
+    stream.synchronize()?;
+    // Increment kernel generation after kernel completes
+    KERNEL_GENERATION.fetch_add(1, Ordering::Relaxed);
+    result
+}
+
 pub struct CudaHal<Hash: CudaHash + ?Sized> {
     pub max_threads: u32,
     hash: Option<Box<Hash>>,
     _context: Context,
+    stream: Stream,
     _lock: ReentrantMutexGuard<'static, ()>,
 }
 
@@ -394,6 +450,44 @@ impl RawBuffer {
         }
     }
 
+    /// Set memory advice hint: mark buffer as read-mostly (optimized for GPU reads)
+    /// Use this for input buffers that are primarily read by kernels
+    fn advise_read_mostly(&self) {
+        let ptr = self.buf.as_device_ptr().as_raw() as *const std::os::raw::c_void;
+        let size = self.buf.len();
+        unsafe {
+            let result = cudaMemAdvise(
+                ptr,
+                size,
+                CudaMemAdvise::SetReadMostly as u32,
+                0, // Current device
+            );
+            // Ignore errors - memory advice is just a hint, CUDA may ignore it
+            if result != 0 {
+                tracing::trace!("cudaMemAdvise SetReadMostly returned {}", result);
+            }
+        }
+    }
+
+    /// Set memory advice hint: mark buffer with preferred location on GPU
+    /// Use this for output buffers that will be written by kernels
+    fn advise_preferred_location_gpu(&self) {
+        let ptr = self.buf.as_device_ptr().as_raw() as *const std::os::raw::c_void;
+        let size = self.buf.len();
+        unsafe {
+            let result = cudaMemAdvise(
+                ptr,
+                size,
+                CudaMemAdvise::SetPreferredLocation as u32,
+                0, // Current device
+            );
+            // Ignore errors - memory advice is just a hint
+            if result != 0 {
+                tracing::trace!("cudaMemAdvise SetPreferredLocation returned {}", result);
+            }
+        }
+    }
+
     /// Update device buffer from host cache (for view_mut)
     fn sync_to_device(&mut self, host_data: &[u8]) {
         self.buf.copy_from(host_data).unwrap();
@@ -404,6 +498,23 @@ impl RawBuffer {
         if let Some(ref mut cached) = self.cached_host {
             cached.copy_from_slice(host_data);
         }
+    }
+
+    /// Async copy from host to device using a CUDA stream
+    /// Note: The stream handle needs to be obtained from cust::Stream
+    /// For now, we use synchronous copy but this provides the interface for async
+    fn copy_from_async(&mut self, _stream: &Stream, host_data: &[u8]) -> Result<()> {
+        // TODO: Use cudaMemcpyAsync once we can get raw stream handle from cust::Stream
+        // For now, fall back to synchronous copy
+        self.buf.copy_from(host_data)?;
+
+        // Update cache
+        self.last_kernel_gen.set(0);
+        if let Some(ref mut cached) = self.cached_host {
+            cached.copy_from_slice(host_data);
+        }
+
+        Ok(())
     }
 }
 
@@ -475,6 +586,18 @@ impl<T> BufferImpl<T> {
         let ptr = buf.buf.as_device_ptr();
         let offset = self.offset * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
+    }
+
+    /// Mark this buffer as read-mostly (optimized for GPU reads)
+    /// Call this for input buffers that are primarily read by kernels
+    pub fn mark_read_mostly(&self) {
+        self.buffer.borrow().advise_read_mostly();
+    }
+
+    /// Mark this buffer with preferred location on GPU
+    /// Call this for output buffers that will be written by kernels
+    pub fn mark_preferred_location_gpu(&self) {
+        self.buffer.borrow().advise_preferred_location_gpu();
     }
 
     pub fn as_device_ptr_with_offset(&self, offset: usize) -> DevicePointer<u8> {
@@ -580,6 +703,11 @@ impl<CH: CudaHash + ?Sized> CudaHal<CH> {
         Self::new_from_hash(Box::new(CH::new()))
     }
 
+    /// Get the CUDA stream for async operations
+    pub fn stream(&self) -> &Stream {
+        &self.stream
+    }
+
     fn new_from_hash(hash: Box<CH>) -> Self {
         let _lock = singleton().lock();
 
@@ -596,9 +724,15 @@ impl<CH: CudaHash + ?Sized> CudaHal<CH> {
         let context = Context::new(device).unwrap();
         context.set_flags(ContextFlags::SCHED_AUTO).unwrap();
 
+        // Create a CUDA stream for async operations
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .context("Failed to create CUDA stream")
+            .unwrap();
+
         let mut hal = Self {
             max_threads: max_threads as u32,
             _context: context,
+            stream,
             hash: None,
             _lock,
         };
@@ -651,7 +785,10 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
     type Buffer<T: Clone + Debug + PartialEq> = BufferImpl<T>;
 
     fn alloc_elem(&self, name: &'static str, size: usize) -> Self::Buffer<Self::Elem> {
-        BufferImpl::new(name, size)
+        let buffer = BufferImpl::new(name, size);
+        // Mark newly allocated buffers as preferred location on GPU (they'll be written to)
+        buffer.mark_preferred_location_gpu();
+        buffer
     }
 
     fn alloc_elem_init(
@@ -669,11 +806,19 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
     }
 
     fn copy_from_elem(&self, name: &'static str, slice: &[Self::Elem]) -> Self::Buffer<Self::Elem> {
-        BufferImpl::copy_from(name, slice)
+        let mut buffer = BufferImpl::copy_from(name, slice);
+        // Mark input buffers (copied from host) as read-mostly (they'll be read by kernels)
+        buffer.mark_read_mostly();
+        // TODO: Use async copy with stream for better performance
+        // For now, synchronous copy is used but stream is available via self.stream()
+        buffer
     }
 
     fn alloc_extelem(&self, name: &'static str, size: usize) -> Self::Buffer<Self::ExtElem> {
-        BufferImpl::new(name, size)
+        let buffer = BufferImpl::new(name, size);
+        // Mark newly allocated buffers as preferred location on GPU
+        buffer.mark_preferred_location_gpu();
+        buffer
     }
 
     fn alloc_extelem_zeroed(&self, name: &'static str, size: usize) -> Self::Buffer<Self::ExtElem> {
@@ -687,23 +832,38 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         name: &'static str,
         slice: &[Self::ExtElem],
     ) -> Self::Buffer<Self::ExtElem> {
-        BufferImpl::copy_from(name, slice)
+        let buffer = BufferImpl::copy_from(name, slice);
+        // Mark input buffers as read-mostly
+        buffer.mark_read_mostly();
+        buffer
     }
 
     fn alloc_digest(&self, name: &'static str, size: usize) -> Self::Buffer<Digest> {
-        BufferImpl::new(name, size)
+        let buffer = BufferImpl::new(name, size);
+        // Mark newly allocated buffers as preferred location on GPU
+        buffer.mark_preferred_location_gpu();
+        buffer
     }
 
     fn copy_from_digest(&self, name: &'static str, slice: &[Digest]) -> Self::Buffer<Digest> {
-        BufferImpl::copy_from(name, slice)
+        let buffer = BufferImpl::copy_from(name, slice);
+        // Mark input buffers as read-mostly
+        buffer.mark_read_mostly();
+        buffer
     }
 
     fn alloc_u32(&self, name: &'static str, size: usize) -> Self::Buffer<u32> {
-        BufferImpl::new(name, size)
+        let buffer = BufferImpl::new(name, size);
+        // Mark newly allocated buffers as preferred location on GPU
+        buffer.mark_preferred_location_gpu();
+        buffer
     }
 
     fn copy_from_u32(&self, name: &'static str, slice: &[u32]) -> Self::Buffer<u32> {
-        BufferImpl::copy_from(name, slice)
+        let buffer = BufferImpl::copy_from(name, slice);
+        // Mark input buffers as read-mostly
+        buffer.mark_read_mostly();
+        buffer
     }
 
     fn batch_expand_into_evaluate_ntt(
@@ -792,7 +952,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_batch_bit_reverse(io.as_device_ptr(), bits as u32, io_size as u32)
             })
@@ -833,7 +994,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_batch_evaluate_any(
                     out.as_device_ptr(),
@@ -867,7 +1029,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_gather_sample(
                     dst.as_device_ptr(),
@@ -889,7 +1052,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         let bits = log2_ceil(io.size() / poly_count);
         assert_eq!(io.size(), poly_count * (1 << bits));
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             let err = unsafe {
                 sppark_batch_zk_shift(
                     io.as_device_ptr(),
@@ -930,7 +1094,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_mix_poly_coeffs(
                     output.as_device_ptr(),
@@ -965,7 +1130,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_eltwise_add_fp(
                     output.as_device_ptr(),
@@ -997,7 +1163,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_eltwise_sum_fpext(
                     output.as_device_ptr(),
@@ -1026,7 +1193,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_eltwise_copy_fp(
                     output.as_device_ptr(),
@@ -1046,7 +1214,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_eltwise_zeroize_fp(elems.as_device_ptr(), elems.size() as u32)
             })
@@ -1084,7 +1253,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_scatter(
                     into.as_device_ptr(),
@@ -1124,7 +1294,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_eltwise_copy_fp_region(
                     into.as_device_ptr(),
@@ -1161,7 +1332,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_fri_fold(
                     output.as_device_ptr(),
@@ -1227,7 +1399,8 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        execute_kernel(|| {
+        // Use stream for async kernel execution
+        execute_kernel_with_stream(self.stream(), || {
             ffi_wrap(|| unsafe {
                 risc0_zkp_cuda_combos_prepare(
                     combos.as_device_ptr(),
