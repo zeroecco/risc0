@@ -12,7 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cell::RefCell, fmt::Debug, marker::PhantomData, rc::Rc, sync::OnceLock};
+use std::{
+    cell::RefCell,
+    fmt::Debug,
+    marker::PhantomData,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
+};
 
 use anyhow::{bail, Context as _, Result};
 use cust::{
@@ -98,7 +107,10 @@ impl CudaHash for CudaHashSha256 {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe { risc0_zkp_cuda_sha_fold(output, input, output_size as u32) }).unwrap();
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe { risc0_zkp_cuda_sha_fold(output, input, output_size as u32) })
+        })
+        .unwrap();
     }
 
     fn hash_rows(&self, output: &BufferImpl<Digest>, matrix: &BufferImpl<BabyBearElem>) {
@@ -115,13 +127,15 @@ impl CudaHash for CudaHashSha256 {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_sha_rows(
-                output.as_device_ptr(),
-                matrix.as_device_ptr(),
-                row_size as u32,
-                col_size as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_sha_rows(
+                    output.as_device_ptr(),
+                    matrix.as_device_ptr(),
+                    row_size as u32,
+                    col_size as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -221,6 +235,23 @@ impl CudaHash for CudaHashPoseidon254 {
     }
 }
 
+// Static kernel generation counter - increments after each kernel operation
+// Used to track which buffers might have been modified by kernels
+static KERNEL_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Execute a kernel operation and increment kernel generation counter
+/// This ensures buffers used in kernels are marked as potentially modified
+fn execute_kernel<F>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let result = f();
+    // Increment kernel generation after kernel completes
+    // This marks all buffers that had device pointers accessed as potentially modified
+    KERNEL_GENERATION.fetch_add(1, Ordering::Relaxed);
+    result
+}
+
 pub struct CudaHal<Hash: CudaHash + ?Sized> {
     pub max_threads: u32,
     hash: Option<Box<Hash>>,
@@ -238,8 +269,12 @@ struct RawBuffer {
     // Host-side cache to avoid repeated D2H transfers
     // This provides significant speedup for frequently accessed buffers
     cached_host: Option<Vec<u8>>,
-    // True if device buffer has been modified since last cache update
-    device_dirty: bool,
+    // Kernel generation when this buffer's device pointer was last accessed
+    // If this >= cache_kernel_gen, buffer might have been modified by a kernel
+    last_kernel_gen: std::cell::Cell<u64>,
+    // Kernel generation when cache was created
+    // Cache is valid only if last_kernel_gen < cache_kernel_gen
+    cache_kernel_gen: std::cell::Cell<u64>,
 }
 
 impl RawBuffer {
@@ -253,37 +288,55 @@ impl RawBuffer {
             name,
             buf,
             cached_host: None,
-            device_dirty: false,
+            last_kernel_gen: std::cell::Cell::new(0),
+            cache_kernel_gen: std::cell::Cell::new(0),
         }
     }
 
     pub fn set_u32(&mut self, value: u32) {
         self.buf.set_32(value).unwrap();
-        self.device_dirty = true;
         // Invalidate cache since device was modified
         self.cached_host = None;
     }
 
-    /// Get host-side copy, using cache if available and up-to-date
+    /// Get host-side copy, using cache if available and up-to-date.
+    /// Cache is only used if the buffer hasn't been used in any kernel since cache was created.
     fn get_host_copy(&mut self) -> &[u8] {
-        if self.cached_host.is_none() || self.device_dirty {
-            // Cache miss or stale - transfer from device
+        let last_gen = self.last_kernel_gen.get();
+        let cache_gen = self.cache_kernel_gen.get();
+        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+
+        // Use cache only if:
+        // 1. Cache exists
+        // 2. Buffer hasn't been used in any kernel since cache was created
+        //    (last_gen < cache_gen means buffer was used before cache, so cache is still valid)
+        //    (last_gen >= cache_gen means buffer was used after cache, so cache might be stale)
+        let cache_valid = self.cached_host.is_some() && last_gen < cache_gen;
+
+        if !cache_valid {
+            // Cache miss or buffer was used in kernel after cache - fetch fresh from device
             self.cached_host = Some(self.buf.as_host_vec().unwrap());
-            self.device_dirty = false;
+            // Cache was created at current generation (before any new kernels)
+            self.cache_kernel_gen.set(current_gen);
+            // Reset last_kernel_gen since we just synced (buffer hasn't been used in kernel yet)
+            self.last_kernel_gen.set(0);
         }
         self.cached_host.as_ref().unwrap()
     }
 
-    /// Mark that device buffer has been modified (e.g., by kernel)
-    fn mark_device_dirty(&mut self) {
-        self.device_dirty = true;
+    /// Mark that this buffer's device pointer was accessed (might be used in kernel)
+    fn mark_device_ptr_accessed(&self) {
+        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+        self.last_kernel_gen.set(current_gen);
     }
 
     /// Update device buffer from host cache (for view_mut)
     fn sync_to_device(&mut self, host_data: &[u8]) {
         self.buf.copy_from(host_data).unwrap();
-        // After sync, cache is valid again
-        self.device_dirty = false;
+        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+        // After sync, cache is valid again and buffer hasn't been used in kernel
+        self.last_kernel_gen.set(0);
+        self.cache_kernel_gen.set(current_gen);
         if let Some(ref mut cached) = self.cached_host {
             cached.copy_from_slice(host_data);
         }
@@ -336,10 +389,12 @@ impl<T> BufferImpl<T> {
         let mut buffer = RawBuffer::new(name, bytes_len);
         let bytes = unchecked_cast(slice);
         buffer.buf.copy_from(bytes).unwrap();
-        // After copy_from, device has the data, so cache can be populated immediately
-        // This avoids a D2H transfer on first access
+        // Populate cache immediately since we just copied from host
+        // This avoids D2H transfer on first access
+        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
         buffer.cached_host = Some(bytes.to_vec());
-        buffer.device_dirty = false;
+        buffer.cache_kernel_gen.set(current_gen);
+        buffer.last_kernel_gen.set(0); // Buffer hasn't been used in kernel yet
 
         BufferImpl {
             buffer: Rc::new(RefCell::new(buffer)),
@@ -350,26 +405,19 @@ impl<T> BufferImpl<T> {
     }
 
     pub fn as_device_ptr(&self) -> DevicePointer<u8> {
-        // Note: We don't mark dirty here because this is called before kernels.
-        // Kernels will modify the buffer, but we can't know which buffers are outputs.
-        // The cache will be invalidated on next access if needed (conservative approach).
+        // Mark that this buffer's device pointer is being accessed (might be used in kernel)
+        self.buffer.borrow().mark_device_ptr_accessed();
         let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
         let offset = self.offset * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
     }
 
     pub fn as_device_ptr_with_offset(&self, offset: usize) -> DevicePointer<u8> {
-        // Note: We don't mark dirty here because this is called before kernels.
-        // Kernels will modify the buffer, but we can't know which buffers are outputs.
+        // Mark that this buffer's device pointer is being accessed (might be used in kernel)
+        self.buffer.borrow().mark_device_ptr_accessed();
         let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
         let offset = (self.offset + offset) * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
-    }
-
-    /// Mark this buffer as dirty (device has been modified by a kernel).
-    /// Call this after kernel operations that modify output buffers.
-    pub fn mark_dirty(&self) {
-        self.buffer.borrow_mut().mark_device_dirty();
     }
 }
 
@@ -667,8 +715,10 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_batch_bit_reverse(io.as_device_ptr(), bits as u32, io_size as u32)
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_batch_bit_reverse(io.as_device_ptr(), bits as u32, io_size as u32)
+            })
         })
         .unwrap();
     }
@@ -706,16 +756,18 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_batch_evaluate_any(
-                out.as_device_ptr(),
-                coeffs.as_device_ptr(),
-                which.as_device_ptr(),
-                xs.as_device_ptr(),
-                shared_size,
-                kernel_count as u32,
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_batch_evaluate_any(
+                    out.as_device_ptr(),
+                    coeffs.as_device_ptr(),
+                    which.as_device_ptr(),
+                    xs.as_device_ptr(),
+                    shared_size,
+                    kernel_count as u32,
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -738,14 +790,16 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_gather_sample(
-                dst.as_device_ptr(),
-                src.as_device_ptr(),
-                idx as u32,
-                size as u32,
-                stride as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_gather_sample(
+                    dst.as_device_ptr(),
+                    src.as_device_ptr(),
+                    idx as u32,
+                    size as u32,
+                    stride as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -758,16 +812,20 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         let bits = log2_ceil(io.size() / poly_count);
         assert_eq!(io.size(), poly_count * (1 << bits));
 
-        let err = unsafe {
-            sppark_batch_zk_shift(
-                io.as_device_ptr(),
-                bits.try_into().unwrap(),
-                poly_count.try_into().unwrap(),
-            )
-        };
-        if err.code != 0 {
-            panic!("Failure during zk_shift: {err}");
-        }
+        execute_kernel(|| {
+            let err = unsafe {
+                sppark_batch_zk_shift(
+                    io.as_device_ptr(),
+                    bits.try_into().unwrap(),
+                    poly_count.try_into().unwrap(),
+                )
+            };
+            if err.code != 0 {
+                panic!("Failure during zk_shift: {err}");
+            }
+            Ok(())
+        })
+        .unwrap();
     }
 
     fn mix_poly_coeffs(
@@ -795,16 +853,18 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_mix_poly_coeffs(
-                output.as_device_ptr(),
-                input.as_device_ptr(),
-                combos.as_device_ptr(),
-                mix_start.as_device_ptr(),
-                mix.as_device_ptr(),
-                input_size as u32,
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_mix_poly_coeffs(
+                    output.as_device_ptr(),
+                    input.as_device_ptr(),
+                    combos.as_device_ptr(),
+                    mix_start.as_device_ptr(),
+                    mix.as_device_ptr(),
+                    input_size as u32,
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -828,13 +888,15 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_eltwise_add_fp(
-                output.as_device_ptr(),
-                input1.as_device_ptr(),
-                input2.as_device_ptr(),
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_eltwise_add_fp(
+                    output.as_device_ptr(),
+                    input1.as_device_ptr(),
+                    input2.as_device_ptr(),
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -858,13 +920,15 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_eltwise_sum_fpext(
-                output.as_device_ptr(),
-                input.as_device_ptr(),
-                to_add as u32,
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_eltwise_sum_fpext(
+                    output.as_device_ptr(),
+                    input.as_device_ptr(),
+                    to_add as u32,
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -885,12 +949,14 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_eltwise_copy_fp(
-                output.as_device_ptr(),
-                input.as_device_ptr(),
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_eltwise_copy_fp(
+                    output.as_device_ptr(),
+                    input.as_device_ptr(),
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -903,8 +969,10 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_eltwise_zeroize_fp(elems.as_device_ptr(), elems.size() as u32)
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_eltwise_zeroize_fp(elems.as_device_ptr(), elems.size() as u32)
+            })
         })
         .unwrap();
     }
@@ -939,14 +1007,16 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_scatter(
-                into.as_device_ptr(),
-                index.as_device_ptr(),
-                offsets.as_device_ptr(),
-                values.as_device_ptr(),
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_scatter(
+                    into.as_device_ptr(),
+                    index.as_device_ptr(),
+                    offsets.as_device_ptr(),
+                    values.as_device_ptr(),
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -977,17 +1047,19 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_eltwise_copy_fp_region(
-                into.as_device_ptr(),
-                from.as_device_ptr(),
-                from_rows as u32,
-                from_cols as u32,
-                from_offset as u32,
-                from_stride as u32,
-                into_offset as u32,
-                into_stride as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_eltwise_copy_fp_region(
+                    into.as_device_ptr(),
+                    from.as_device_ptr(),
+                    from_rows as u32,
+                    from_cols as u32,
+                    from_offset as u32,
+                    from_stride as u32,
+                    into_offset as u32,
+                    into_stride as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -1012,13 +1084,15 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_fri_fold(
-                output.as_device_ptr(),
-                input.as_device_ptr(),
-                mix.as_device_ptr(),
-                count as u32,
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_fri_fold(
+                    output.as_device_ptr(),
+                    input.as_device_ptr(),
+                    mix.as_device_ptr(),
+                    count as u32,
+                )
+            })
         })
         .unwrap();
     }
@@ -1076,18 +1150,20 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
             ) -> *const std::os::raw::c_char;
         }
 
-        ffi_wrap(|| unsafe {
-            risc0_zkp_cuda_combos_prepare(
-                combos.as_device_ptr(),
-                coeff_u.as_device_ptr(),
-                combo_count,
-                cycles,
-                regs_count,
-                reg_sizes.as_device_ptr(),
-                reg_combo_ids.as_device_ptr(),
-                Self::CHECK_SIZE as u32,
-                mix.as_device_ptr(),
-            )
+        execute_kernel(|| {
+            ffi_wrap(|| unsafe {
+                risc0_zkp_cuda_combos_prepare(
+                    combos.as_device_ptr(),
+                    coeff_u.as_device_ptr(),
+                    combo_count,
+                    cycles,
+                    regs_count,
+                    reg_sizes.as_device_ptr(),
+                    reg_combo_ids.as_device_ptr(),
+                    Self::CHECK_SIZE as u32,
+                    mix.as_device_ptr(),
+                )
+            })
         })
         .unwrap();
     }
