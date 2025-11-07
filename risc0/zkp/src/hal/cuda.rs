@@ -239,8 +239,15 @@ impl CudaHash for CudaHashPoseidon254 {
 // Used to track which buffers might have been modified by kernels
 static KERNEL_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+// Size threshold for caching - only cache buffers under this size (default: 100MB)
+// Large buffers are less likely to benefit from caching due to memory pressure
+const CACHE_SIZE_THRESHOLD: usize = 100 * 1024 * 1024;
+
 /// Execute a kernel operation and increment kernel generation counter
 /// This ensures buffers used in kernels are marked as potentially modified
+///
+/// Note: After kernel execution, consider calling `warm_cache_after_kernel()`
+/// on output buffers that will be read to pre-populate their cache.
 fn execute_kernel<F>(f: F) -> Result<()>
 where
     F: FnOnce() -> Result<()>,
@@ -275,6 +282,9 @@ struct RawBuffer {
     // Kernel generation when cache was created
     // Cache is valid only if last_kernel_gen < cache_kernel_gen
     cache_kernel_gen: std::cell::Cell<u64>,
+    // Access count - tracks how many times this buffer has been accessed
+    // Used to prioritize caching frequently accessed buffers
+    access_count: std::cell::Cell<u32>,
 }
 
 impl RawBuffer {
@@ -290,25 +300,39 @@ impl RawBuffer {
             cached_host: None,
             last_kernel_gen: std::cell::Cell::new(0),
             cache_kernel_gen: std::cell::Cell::new(0),
+            access_count: std::cell::Cell::new(0),
         }
     }
 
     pub fn set_u32(&mut self, value: u32) {
         self.buf.set_32(value).unwrap();
-        // Invalidate cache since device was modified
-        self.cached_host = None;
+        // Lazy cache invalidation - only clear if cache exists
+        // This avoids unnecessary work if cache wasn't populated
+        if self.cached_host.is_some() {
+            self.cached_host = None;
+        }
     }
 
     /// Get host-side copy, using cache if available and up-to-date.
     /// Cache is only used if the buffer hasn't been used in any kernel since cache was created.
     fn get_host_copy(&mut self) -> &[u8] {
+        // Track access for prioritization
+        self.access_count
+            .set(self.access_count.get().saturating_add(1));
+
         // Fast path: if buffer was never used in kernel (last_gen == 0), cache is always valid
         let last_gen = self.last_kernel_gen.get();
 
         if last_gen == 0 {
             // Buffer never used in kernel - use cache if available
             if self.cached_host.is_none() {
-                self.cached_host = Some(self.buf.as_host_vec().unwrap());
+                // Only cache if buffer is under size threshold
+                if self.buf.len() <= CACHE_SIZE_THRESHOLD {
+                    self.cached_host = Some(self.buf.as_host_vec().unwrap());
+                } else {
+                    // For large buffers, just return fresh data without caching
+                    return self.buf.as_host_vec().unwrap();
+                }
             }
             return self.cached_host.as_ref().unwrap();
         }
@@ -325,10 +349,49 @@ impl RawBuffer {
 
         // Cache invalid or doesn't exist - fetch fresh from device
         let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
-        self.cached_host = Some(self.buf.as_host_vec().unwrap());
-        self.cache_kernel_gen.set(current_gen);
+        // Only cache if buffer is under size threshold and has been accessed multiple times
+        let should_cache = self.buf.len() <= CACHE_SIZE_THRESHOLD && self.access_count.get() > 1; // Cache if accessed more than once
+        if should_cache {
+            self.cached_host = Some(self.buf.as_host_vec().unwrap());
+            self.cache_kernel_gen.set(current_gen);
+        } else {
+            // For large or rarely accessed buffers, don't cache
+            return self.buf.as_host_vec().unwrap();
+        }
         self.last_kernel_gen.set(0); // Reset since we just synced
         self.cached_host.as_ref().unwrap()
+    }
+
+    /// Prefetch hint - indicates this buffer will be accessed soon
+    /// This allows us to start fetching data asynchronously if possible
+    fn prefetch_hint(&mut self) {
+        // If buffer is likely to be accessed and cache is missing, start prefetching
+        // For now, we just ensure cache exists if buffer hasn't been used in kernel
+        let last_gen = self.last_kernel_gen.get();
+        if last_gen == 0 && self.cached_host.is_none() && self.buf.len() <= CACHE_SIZE_THRESHOLD {
+            // Pre-populate cache for buffers that haven't been used in kernels
+            self.cached_host = Some(self.buf.as_host_vec().unwrap());
+        }
+    }
+
+    /// Warm cache for a buffer that will be read after kernel execution
+    /// Call this after kernel operations to pre-populate cache for output buffers
+    fn warm_cache_after_kernel(&mut self) {
+        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+        let last_gen = self.last_kernel_gen.get();
+
+        // Only warm cache if:
+        // 1. Buffer was used in kernel (last_gen > 0)
+        // 2. Buffer is under size threshold
+        // 3. Cache doesn't exist or is invalid
+        if last_gen > 0
+            && self.buf.len() <= CACHE_SIZE_THRESHOLD
+            && (self.cached_host.is_none() || last_gen >= self.cache_kernel_gen.get())
+        {
+            self.cached_host = Some(self.buf.as_host_vec().unwrap());
+            self.cache_kernel_gen.set(current_gen);
+            self.last_kernel_gen.set(0); // Reset since we just synced
+        }
     }
 
     /// Mark that this buffer's device pointer was accessed (might be used in kernel)
@@ -431,6 +494,16 @@ impl<T> BufferImpl<T> {
         let ptr = buf.buf.as_device_ptr();
         let offset = (self.offset + offset) * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
+    }
+
+    /// Hint that this buffer will be accessed soon - allows prefetching
+    pub fn prefetch_hint(&self) {
+        self.buffer.borrow_mut().prefetch_hint();
+    }
+
+    /// Warm cache after kernel execution - call this for output buffers that will be read
+    pub fn warm_cache_after_kernel(&self) {
+        self.buffer.borrow_mut().warm_cache_after_kernel();
     }
 }
 
