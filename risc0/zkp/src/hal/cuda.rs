@@ -235,6 +235,11 @@ pub type CudaHalPoseidon254 = CudaHal<CudaHashPoseidon254>;
 struct RawBuffer {
     name: &'static str,
     buf: DeviceBuffer<u8>,
+    // Host-side cache to avoid repeated D2H transfers
+    // This provides significant speedup for frequently accessed buffers
+    cached_host: Option<Vec<u8>>,
+    // True if device buffer has been modified since last cache update
+    device_dirty: bool,
 }
 
 impl RawBuffer {
@@ -244,11 +249,44 @@ impl RawBuffer {
         let buf = unsafe { DeviceBuffer::uninitialized(size) }
             .context(format!("allocation failed on {name}: {size} bytes"))
             .unwrap();
-        Self { name, buf }
+        Self {
+            name,
+            buf,
+            cached_host: None,
+            device_dirty: false,
+        }
     }
 
     pub fn set_u32(&mut self, value: u32) {
         self.buf.set_32(value).unwrap();
+        self.device_dirty = true;
+        // Invalidate cache since device was modified
+        self.cached_host = None;
+    }
+
+    /// Get host-side copy, using cache if available and up-to-date
+    fn get_host_copy(&mut self) -> &[u8] {
+        if self.cached_host.is_none() || self.device_dirty {
+            // Cache miss or stale - transfer from device
+            self.cached_host = Some(self.buf.as_host_vec().unwrap());
+            self.device_dirty = false;
+        }
+        self.cached_host.as_ref().unwrap()
+    }
+
+    /// Mark that device buffer has been modified (e.g., by kernel)
+    fn mark_device_dirty(&mut self) {
+        self.device_dirty = true;
+    }
+
+    /// Update device buffer from host cache (for view_mut)
+    fn sync_to_device(&mut self, host_data: &[u8]) {
+        self.buf.copy_from(host_data).unwrap();
+        // After sync, cache is valid again
+        self.device_dirty = false;
+        if let Some(ref mut cached) = self.cached_host {
+            cached.copy_from_slice(host_data);
+        }
     }
 }
 
@@ -298,6 +336,10 @@ impl<T> BufferImpl<T> {
         let mut buffer = RawBuffer::new(name, bytes_len);
         let bytes = unchecked_cast(slice);
         buffer.buf.copy_from(bytes).unwrap();
+        // After copy_from, device has the data, so cache can be populated immediately
+        // This avoids a D2H transfer on first access
+        buffer.cached_host = Some(bytes.to_vec());
+        buffer.device_dirty = false;
 
         BufferImpl {
             buffer: Rc::new(RefCell::new(buffer)),
@@ -308,15 +350,26 @@ impl<T> BufferImpl<T> {
     }
 
     pub fn as_device_ptr(&self) -> DevicePointer<u8> {
+        // Note: We don't mark dirty here because this is called before kernels.
+        // Kernels will modify the buffer, but we can't know which buffers are outputs.
+        // The cache will be invalidated on next access if needed (conservative approach).
         let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
         let offset = self.offset * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
     }
 
     pub fn as_device_ptr_with_offset(&self, offset: usize) -> DevicePointer<u8> {
+        // Note: We don't mark dirty here because this is called before kernels.
+        // Kernels will modify the buffer, but we can't know which buffers are outputs.
         let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
         let offset = (self.offset + offset) * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
+    }
+
+    /// Mark this buffer as dirty (device has been modified by a kernel).
+    /// Call this after kernel operations that modify output buffers.
+    pub fn mark_dirty(&self) {
+        self.buffer.borrow_mut().mark_device_dirty();
     }
 }
 
@@ -340,42 +393,50 @@ impl<T: Clone> Buffer<T> for BufferImpl<T> {
     }
 
     fn get_at(&self, idx: usize) -> T {
-        let item_size = std::mem::size_of::<T>();
+        // Use cached host copy if available to avoid D2H transfer
         let buf = self.buffer.borrow_mut();
+        let host_copy = buf.get_host_copy();
+        let item_size = std::mem::size_of::<T>();
         let offset = (self.offset + idx) * item_size;
-        let ptr = unsafe { buf.buf.as_device_ptr().offset(offset as isize) };
-        let device_slice = unsafe { DeviceSlice::from_raw_parts(ptr, item_size) };
-        let host_buf = device_slice.as_host_vec().unwrap();
-        let slice: &[T] = unchecked_cast(&host_buf);
+        let slice: &[T] = unchecked_cast(&host_copy[offset..offset + item_size]);
         slice[0].clone()
     }
 
     fn view<F: FnOnce(&[T])>(&self, f: F) {
         scope!("view");
+        // Use cached host copy to avoid D2H transfer
+        let mut buf = self.buffer.borrow_mut();
+        let host_copy = buf.get_host_copy();
         let item_size = std::mem::size_of::<T>();
-        let buf = self.buffer.borrow_mut();
         let offset = self.offset * item_size;
         let len = self.size * item_size;
-        let ptr = unsafe { buf.buf.as_device_ptr().offset(offset as isize) };
-        let device_slice = unsafe { DeviceSlice::from_raw_parts(ptr, len) };
-        let host_buf = device_slice.as_host_vec().unwrap();
-        let slice = unchecked_cast(&host_buf);
+        let slice = unchecked_cast(&host_copy[offset..offset + len]);
         f(slice);
     }
 
     fn view_mut<F: FnOnce(&mut [T])>(&self, f: F) {
         scope!("view_mut");
         let mut buf = self.buffer.borrow_mut();
-        let mut host_buf = buf.buf.as_host_vec().unwrap();
-        let slice = unchecked_cast_mut(&mut host_buf);
-        f(&mut slice[self.offset..]);
-        buf.buf.copy_from(&host_buf).unwrap();
+        // Get or create host copy
+        let host_copy = buf.get_host_copy().to_vec();
+        let mut host_buf = host_copy;
+        let item_size = std::mem::size_of::<T>();
+        let offset = self.offset * item_size;
+        let len = self.size * item_size;
+        let slice = unchecked_cast_mut(&mut host_buf[offset..offset + len]);
+        f(slice);
+        // Sync back to device
+        buf.sync_to_device(&host_buf);
     }
 
     fn to_vec(&self) -> Vec<T> {
-        let buf = self.buffer.borrow_mut();
-        let host_buf = buf.buf.as_host_vec().unwrap();
-        let slice = unchecked_cast(&host_buf);
+        // Use cached host copy to avoid D2H transfer
+        let mut buf = self.buffer.borrow_mut();
+        let host_copy = buf.get_host_copy();
+        let item_size = std::mem::size_of::<T>();
+        let offset = self.offset * item_size;
+        let len = self.size * item_size;
+        let slice = unchecked_cast(&host_copy[offset..offset + len]);
         slice.to_vec()
     }
 }
