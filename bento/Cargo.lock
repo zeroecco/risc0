@@ -1256,8 +1256,10 @@ checksum = "7e36cc9d416881d2e24f9a963be5fb1cd90966419ac844274161d10488b3e825"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-targets 0.52.6",
 ]
 
@@ -5038,7 +5040,9 @@ checksum = "f3cb5ba0dc43242ce17de99c180e96db90b235b8a9fdc9543c96d2209116bd9f"
 name = "rzup"
 version = "0.5.1"
 dependencies = [
+ "chrono",
  "hex",
+ "num_cpus",
  "rsa",
  "semver 1.0.24",
  "serde",

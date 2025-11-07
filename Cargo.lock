@@ -1900,8 +1900,10 @@ checksum = "1a7964611d71df112cb1730f2ee67324fcf4d0fc6606acbbe9bfe06df124637c"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -7784,6 +7786,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-secretsmanager",
  "aws-sigv4",
+ "chrono",
  "clap 4.5.37",
  "colored",
  "flate2",
@@ -7797,6 +7800,7 @@ dependencies = [
  "is-terminal",
  "liblzma",
  "maplit",
+ "num_cpus",
  "paste",
  "rand 0.8.5",
  "reqwest",

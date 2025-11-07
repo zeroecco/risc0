@@ -23,6 +23,7 @@ use crate::{ProofJson, Seal};
 
 use super::seal_to_json::to_json;
 
+#[allow(dead_code)]
 pub(crate) fn shrink_wrap(seal_bytes: &[u8]) -> Result<Seal> {
     tracing::info!("shrink_wrap: {} seal bytes", seal_bytes.len());
 
@@ -62,16 +63,19 @@ pub(crate) fn shrink_wrap(seal_bytes: &[u8]) -> Result<Seal> {
     }
 }
 
+#[allow(dead_code)]
 struct CalcWitness {
     witness: Vec<wtns_file::FieldElement<32>>,
 }
 
 impl CalcWitness {
+    #[allow(dead_code)]
     fn as_ptr(&self) -> *const u8 {
         self.witness.as_ptr() as *const u8
     }
 }
 
+#[allow(dead_code)]
 fn calc_witness(graph_path: &Path, inputs: &str) -> Result<CalcWitness> {
     let graph = std::fs::read(graph_path)?;
     let witness_encoded = circom_witnesscalc::calc_witness(inputs, &graph)
