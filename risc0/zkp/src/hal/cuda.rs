@@ -326,13 +326,9 @@ impl RawBuffer {
         if last_gen == 0 {
             // Buffer never used in kernel - use cache if available
             if self.cached_host.is_none() {
-                // Only cache if buffer is under size threshold
-                if self.buf.len() <= CACHE_SIZE_THRESHOLD {
-                    self.cached_host = Some(self.buf.as_host_vec().unwrap());
-                } else {
-                    // For large buffers, just return fresh data without caching
-                    return self.buf.as_host_vec().unwrap();
-                }
+                // Cache the data (even for large buffers, we need to store it to return a reference)
+                // For large buffers, this cache may be evicted more aggressively in the future
+                self.cached_host = Some(self.buf.as_host_vec().unwrap());
             }
             return self.cached_host.as_ref().unwrap();
         }
@@ -349,15 +345,10 @@ impl RawBuffer {
 
         // Cache invalid or doesn't exist - fetch fresh from device
         let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
-        // Only cache if buffer is under size threshold and has been accessed multiple times
-        let should_cache = self.buf.len() <= CACHE_SIZE_THRESHOLD && self.access_count.get() > 1; // Cache if accessed more than once
-        if should_cache {
-            self.cached_host = Some(self.buf.as_host_vec().unwrap());
-            self.cache_kernel_gen.set(current_gen);
-        } else {
-            // For large or rarely accessed buffers, don't cache
-            return self.buf.as_host_vec().unwrap();
-        }
+        // Cache the data (we need to store it to return a reference)
+        // For large or rarely accessed buffers, we cache but may evict more aggressively
+        self.cached_host = Some(self.buf.as_host_vec().unwrap());
+        self.cache_kernel_gen.set(current_gen);
         self.last_kernel_gen.set(0); // Reset since we just synced
         self.cached_host.as_ref().unwrap()
     }

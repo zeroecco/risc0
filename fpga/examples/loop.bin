@@ -1,0 +1,3 @@
+# This is a placeholder for the loop.bin file
+# In a real implementation, this would be a compiled RISC-V binary
+# For now, we'll use a simple text representation
