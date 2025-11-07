@@ -302,41 +302,51 @@ impl RawBuffer {
     /// Get host-side copy, using cache if available and up-to-date.
     /// Cache is only used if the buffer hasn't been used in any kernel since cache was created.
     fn get_host_copy(&mut self) -> &[u8] {
+        // Fast path: if buffer was never used in kernel (last_gen == 0), cache is always valid
         let last_gen = self.last_kernel_gen.get();
-        let cache_gen = self.cache_kernel_gen.get();
-        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
 
-        // Use cache only if:
-        // 1. Cache exists
-        // 2. Buffer hasn't been used in any kernel since cache was created
-        //    (last_gen < cache_gen means buffer was used before cache, so cache is still valid)
-        //    (last_gen >= cache_gen means buffer was used after cache, so cache might be stale)
-        let cache_valid = self.cached_host.is_some() && last_gen < cache_gen;
-
-        if !cache_valid {
-            // Cache miss or buffer was used in kernel after cache - fetch fresh from device
-            self.cached_host = Some(self.buf.as_host_vec().unwrap());
-            // Cache was created at current generation (before any new kernels)
-            self.cache_kernel_gen.set(current_gen);
-            // Reset last_kernel_gen since we just synced (buffer hasn't been used in kernel yet)
-            self.last_kernel_gen.set(0);
+        if last_gen == 0 {
+            // Buffer never used in kernel - use cache if available
+            if self.cached_host.is_none() {
+                self.cached_host = Some(self.buf.as_host_vec().unwrap());
+            }
+            return self.cached_host.as_ref().unwrap();
         }
+
+        // Buffer was used in kernel - need to check if cache is still valid
+        // Only do expensive atomic load if we have a cache to check
+        if let Some(_) = &self.cached_host {
+            let cache_gen = self.cache_kernel_gen.get();
+            // If buffer was used before cache was created, cache is still valid
+            if last_gen < cache_gen {
+                return self.cached_host.as_ref().unwrap();
+            }
+        }
+
+        // Cache invalid or doesn't exist - fetch fresh from device
+        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+        self.cached_host = Some(self.buf.as_host_vec().unwrap());
+        self.cache_kernel_gen.set(current_gen);
+        self.last_kernel_gen.set(0); // Reset since we just synced
         self.cached_host.as_ref().unwrap()
     }
 
     /// Mark that this buffer's device pointer was accessed (might be used in kernel)
-    fn mark_device_ptr_accessed(&self) {
-        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
-        self.last_kernel_gen.set(current_gen);
+    fn mark_device_ptr_accessed(&mut self) {
+        // Only update if not already marked (avoid atomic load if already marked)
+        if self.last_kernel_gen.get() == 0 {
+            let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+            self.last_kernel_gen.set(current_gen);
+        }
     }
 
     /// Update device buffer from host cache (for view_mut)
     fn sync_to_device(&mut self, host_data: &[u8]) {
         self.buf.copy_from(host_data).unwrap();
-        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
         // After sync, cache is valid again and buffer hasn't been used in kernel
+        // No need to load atomic - just reset to 0 (never used in kernel)
         self.last_kernel_gen.set(0);
-        self.cache_kernel_gen.set(current_gen);
+        // Update cache without needing to track generation since last_gen is 0
         if let Some(ref mut cached) = self.cached_host {
             cached.copy_from_slice(host_data);
         }
@@ -391,9 +401,8 @@ impl<T> BufferImpl<T> {
         buffer.buf.copy_from(bytes).unwrap();
         // Populate cache immediately since we just copied from host
         // This avoids D2H transfer on first access
-        let current_gen = KERNEL_GENERATION.load(Ordering::Relaxed);
+        // No need to set cache_kernel_gen since last_kernel_gen is 0 (never used in kernel)
         buffer.cached_host = Some(bytes.to_vec());
-        buffer.cache_kernel_gen.set(current_gen);
         buffer.last_kernel_gen.set(0); // Buffer hasn't been used in kernel yet
 
         BufferImpl {
@@ -406,16 +415,20 @@ impl<T> BufferImpl<T> {
 
     pub fn as_device_ptr(&self) -> DevicePointer<u8> {
         // Mark that this buffer's device pointer is being accessed (might be used in kernel)
-        self.buffer.borrow().mark_device_ptr_accessed();
-        let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
+        // Do this in a single borrow to avoid double borrow overhead
+        let mut buf = self.buffer.borrow_mut();
+        buf.mark_device_ptr_accessed();
+        let ptr = buf.buf.as_device_ptr();
         let offset = self.offset * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
     }
 
     pub fn as_device_ptr_with_offset(&self, offset: usize) -> DevicePointer<u8> {
         // Mark that this buffer's device pointer is being accessed (might be used in kernel)
-        self.buffer.borrow().mark_device_ptr_accessed();
-        let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
+        // Do this in a single borrow to avoid double borrow overhead
+        let mut buf = self.buffer.borrow_mut();
+        buf.mark_device_ptr_accessed();
+        let ptr = buf.buf.as_device_ptr();
         let offset = (self.offset + offset) * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
     }
