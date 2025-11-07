@@ -60,6 +60,7 @@ extern "C" {
         device: std::os::raw::c_int,
     ) -> std::os::raw::c_int;
 
+    #[allow(dead_code)]
     fn cudaMemcpyAsync(
         dst: *mut std::os::raw::c_void,
         src: *const std::os::raw::c_void,
@@ -68,10 +69,12 @@ extern "C" {
         stream: *mut std::os::raw::c_void,
     ) -> std::os::raw::c_int;
 
+    #[allow(dead_code)]
     fn cudaStreamSynchronize(stream: *mut std::os::raw::c_void) -> std::os::raw::c_int;
 }
 
 #[repr(u32)]
+#[allow(dead_code)]
 enum CudaMemcpyKind {
     HostToHost = 0,
     HostToDevice = 1,
@@ -503,6 +506,7 @@ impl RawBuffer {
     /// Async copy from host to device using a CUDA stream
     /// Note: The stream handle needs to be obtained from cust::Stream
     /// For now, we use synchronous copy but this provides the interface for async
+    #[allow(dead_code)]
     fn copy_from_async(&mut self, _stream: &Stream, host_data: &[u8]) -> Result<()> {
         // TODO: Use cudaMemcpyAsync once we can get raw stream handle from cust::Stream
         // For now, fall back to synchronous copy
@@ -806,7 +810,7 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
     }
 
     fn copy_from_elem(&self, name: &'static str, slice: &[Self::Elem]) -> Self::Buffer<Self::Elem> {
-        let mut buffer = BufferImpl::copy_from(name, slice);
+        let buffer = BufferImpl::copy_from(name, slice);
         // Mark input buffers (copied from host) as read-mostly (they'll be read by kernels)
         buffer.mark_read_mostly();
         // TODO: Use async copy with stream for better performance

@@ -3,21 +3,25 @@
 ## Current State Analysis
 
 We're currently using:
-- **DeviceBuffer** (not unified memory) - `has_unified_memory()` returns `false`
-- **Synchronous operations** - All memory transfers block the CPU
-- **Standard allocations** - No memory pools
-- **No async operations** - No CUDA streams
-- **No memory hints** - Not using `cudaMemAdvise` or prefetching
+
+* **DeviceBuffer** (not unified memory) - `has_unified_memory()` returns `false`
+* **Synchronous operations** - All memory transfers block the CPU
+* **Standard allocations** - No memory pools
+* **No async operations** - No CUDA streams
+* **No memory hints** - Not using `cudaMemAdvise` or prefetching
 
 ## Missing CUDA Built-ins We Should Explore
 
 ### 1. **CUDA Streams** (HIGHEST IMPACT - 2-3x speedup potential)
+
 **What we're missing:**
-- All operations are synchronous
-- No overlap between computation and memory transfers
-- CPU blocks waiting for GPU operations
+
+* All operations are synchronous
+* No overlap between computation and memory transfers
+* CPU blocks waiting for GPU operations
 
 **What to implement:**
+
 ```rust
 use cust::stream::{Stream, StreamFlags};
 
@@ -44,21 +48,25 @@ fn copy_from_async(&self, stream: &Stream, src: &[u8], dst: DevicePointer<u8>) {
 ```
 
 **Benefits:**
-- Overlap kernel execution with memory transfers
-- 2-3x speedup for pipelined workloads
-- Non-blocking operations
+
+* Overlap kernel execution with memory transfers
+* 2-3x speedup for pipelined workloads
+* Non-blocking operations
 
 **Implementation effort:** Medium
 
----
+***
 
 ### 2. **Async Memory Copies** (`cudaMemcpyAsync`)
+
 **What we're missing:**
-- All `copy_from()` calls are synchronous
-- `as_host_vec()` blocks CPU
-- No pipelining of transfers
+
+* All `copy_from()` calls are synchronous
+* `as_host_vec()` blocks CPU
+* No pipelining of transfers
 
 **What to implement:**
+
 ```rust
 // Replace synchronous copy_from with async version
 impl RawBuffer {
@@ -82,21 +90,25 @@ impl RawBuffer {
 ```
 
 **Benefits:**
-- Overlap transfers with computation
-- Non-blocking operations
-- Better GPU utilization
+
+* Overlap transfers with computation
+* Non-blocking operations
+* Better GPU utilization
 
 **Implementation effort:** Medium
 
----
+***
 
 ### 3. **Memory Pools** (`cudaMallocAsync` - CUDA 11.2+)
+
 **What we're missing:**
-- Standard `DeviceBuffer::uninitialized()` allocations
-- No memory reuse
-- Allocation overhead on every buffer creation
+
+* Standard `DeviceBuffer::uninitialized()` allocations
+* No memory reuse
+* Allocation overhead on every buffer creation
 
 **What to implement:**
+
 ```rust
 use cust::memory::MemoryPool;
 
@@ -119,21 +131,25 @@ impl RawBuffer {
 ```
 
 **Benefits:**
-- 20-40% faster allocations
-- Better memory reuse
-- Reduced fragmentation
-- Non-blocking allocations
+
+* 20-40% faster allocations
+* Better memory reuse
+* Reduced fragmentation
+* Non-blocking allocations
 
 **Implementation effort:** Medium-High
 
----
+***
 
 ### 4. **Memory Advice Hints** (`cudaMemAdvise`)
+
 **What we're missing:**
-- No hints to CUDA about memory access patterns
-- CUDA can't optimize memory placement
+
+* No hints to CUDA about memory access patterns
+* CUDA can't optimize memory placement
 
 **What to implement:**
+
 ```rust
 extern "C" {
     fn cudaMemAdvise(
@@ -182,20 +198,24 @@ impl RawBuffer {
 ```
 
 **Benefits:**
-- Better memory placement
-- Optimized cache behavior
-- 10-20% improvement for memory-bound operations
+
+* Better memory placement
+* Optimized cache behavior
+* 10-20% improvement for memory-bound operations
 
 **Implementation effort:** Low
 
----
+***
 
 ### 5. **Page-Locked (Pinned) Memory** for Host Buffers
+
 **What we're missing:**
-- Host memory in `cached_host` is pageable
-- Slower transfers than pinned memory
+
+* Host memory in `cached_host` is pageable
+* Slower transfers than pinned memory
 
 **What to implement:**
+
 ```rust
 use cust::memory::HostBuffer;
 
@@ -219,20 +239,24 @@ impl RawBuffer {
 ```
 
 **Benefits:**
-- 2-3x faster host-device transfers
-- Can be used with async operations
-- Better for frequent transfers
+
+* 2-3x faster host-device transfers
+* Can be used with async operations
+* Better for frequent transfers
 
 **Implementation effort:** Medium
 
----
+***
 
 ### 6. **Read-Only Cache Hints** (L1/L2 cache optimization)
+
 **What we're missing:**
-- No cache hints for read-only buffers
-- CUDA can't optimize cache behavior
+
+* No cache hints for read-only buffers
+* CUDA can't optimize cache behavior
 
 **What to implement:**
+
 ```rust
 // Use __ldg() intrinsic in kernels for read-only data
 // Or use texture memory for read-only buffers
@@ -240,20 +264,24 @@ impl RawBuffer {
 ```
 
 **Benefits:**
-- Better cache utilization
-- Faster reads for input buffers
-- 5-15% improvement for read-heavy workloads
+
+* Better cache utilization
+* Faster reads for input buffers
+* 5-15% improvement for read-heavy workloads
 
 **Implementation effort:** Low-Medium
 
----
+***
 
 ### 7. **Unified Memory with Selective Prefetching**
+
 **What we're missing:**
-- We disabled unified memory prefetching earlier
-- Could use it more selectively
+
+* We disabled unified memory prefetching earlier
+* Could use it more selectively
 
 **What to implement:**
+
 ```rust
 // Only prefetch for buffers we know will be accessed
 // Use cudaMemPrefetchAsync with proper device hints
@@ -272,44 +300,49 @@ impl RawBuffer {
 ```
 
 **Benefits:**
-- Reduce page faults
-- Better memory locality
-- 10-20% improvement for unified memory workloads
+
+* Reduce page faults
+* Better memory locality
+* 10-20% improvement for unified memory workloads
 
 **Implementation effort:** Low (but need to be selective)
 
----
+***
 
 ## Recommended Implementation Order
 
 ### Phase 1: Quick Wins (Low Risk, Medium Impact)
+
 1. **Memory Advice Hints** - Easy to add, immediate benefit
 2. **Read-Only Cache Hints** - Low risk, good for input buffers
 
 ### Phase 2: High Impact (Medium Risk, High Impact)
+
 3. **CUDA Streams** - Biggest performance gain, requires careful synchronization
 4. **Async Memory Copies** - Works with streams, enables pipelining
 
 ### Phase 3: Scalability (Medium-High Risk, High Impact)
+
 5. **Memory Pools** - Requires CUDA 11.2+, more complex
 6. **Page-Locked Memory** - Good for frequently transferred buffers
 
 ### Phase 4: Advanced (Higher Risk, Variable Impact)
+
 7. **Selective Unified Memory Prefetching** - Need to be careful with sppark compatibility
 
----
+***
 
 ## Expected Performance Gains
 
-- **Current baseline:** Synchronous operations, standard allocations
-- **After Phase 1:** +10-20% improvement
-- **After Phase 2:** +100-200% improvement (2-3x speedup)
-- **After Phase 3:** Additional +20-40% for allocation-heavy workloads
-- **After Phase 4:** Additional +10-20% for specific workloads
+* **Current baseline:** Synchronous operations, standard allocations
+* **After Phase 1:** +10-20% improvement
+* **After Phase 2:** +100-200% improvement (2-3x speedup)
+* **After Phase 3:** Additional +20-40% for allocation-heavy workloads
+* **After Phase 4:** Additional +10-20% for specific workloads
 
 **Total potential:** 2-4x speedup for GB10
 
----
+***
 
 ## Implementation Notes
 
@@ -319,7 +352,7 @@ impl RawBuffer {
 4. **Memory advice is hints only** - CUDA may ignore them, but they help when used correctly
 5. **Pinned memory is limited** - Don't pin everything, only frequently transferred buffers
 
----
+***
 
 ## Next Steps
 
@@ -329,4 +362,3 @@ impl RawBuffer {
 4. Implement async memory copies
 5. Add memory pools if CUDA version supports it
 6. Measure and iterate
-
