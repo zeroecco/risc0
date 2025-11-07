@@ -394,7 +394,7 @@ impl<T: Clone> Buffer<T> for BufferImpl<T> {
 
     fn get_at(&self, idx: usize) -> T {
         // Use cached host copy if available to avoid D2H transfer
-        let buf = self.buffer.borrow_mut();
+        let mut buf = self.buffer.borrow_mut();
         let host_copy = buf.get_host_copy();
         let item_size = std::mem::size_of::<T>();
         let offset = (self.offset + idx) * item_size;
