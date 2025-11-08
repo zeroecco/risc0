@@ -16901,13 +16901,14 @@ __device__ FpExt keccak_4(uint32_t idx,
 
   return x1244;
 }
+// Optimize for register usage - use __restrict__ to help compiler optimize
 __device__ FpExt poly_fp(uint32_t idx,
                          uint32_t size,
-                         const Fp* ctrl,
-                         const Fp* out,
-                         const Fp* data,
-                         const Fp* mix,
-                         const Fp* accum) {
+                         const Fp* __restrict__ ctrl,
+                         const Fp* __restrict__ out,
+                         const Fp* __restrict__ data,
+                         const Fp* __restrict__ mix,
+                         const Fp* __restrict__ accum) {
   uint32_t mask = size - 1;
   Fp x0(23);
   Fp x1(2);

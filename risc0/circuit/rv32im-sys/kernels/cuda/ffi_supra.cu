@@ -66,7 +66,7 @@ const char* risc0_circuit_rv32im_cuda_eval_check(Fp* check,
 
     CudaStream stream;
     auto cfg = getSimpleConfig(domain);
-    cudaMemcpyToSymbol(poly_mix, poly_mix_pows, sizeof(poly_mix));
+    CUDA_OK(cudaMemcpyToSymbol(poly_mix, poly_mix_pows, sizeof(poly_mix)));
     eval_check<<<cfg.grid, cfg.block, 0, stream>>>(
         check, ctrl, data, accum, mix, out, rou, po2, domain);
     CUDA_OK(cudaStreamSynchronize(stream));
