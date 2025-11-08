@@ -200,6 +200,9 @@ impl CudaHash for CudaHashPoseidon2 {
     }
 
     fn hash_fold(&self, io: &BufferImpl<Digest>, output_size: usize) {
+        // Synchronize our stream before calling sppark to avoid conflicts
+        self.stream().synchronize().unwrap();
+
         let err = unsafe {
             let input = io.as_device_ptr_with_offset(2 * output_size);
             let output = io.as_device_ptr_with_offset(output_size);
@@ -211,6 +214,9 @@ impl CudaHash for CudaHashPoseidon2 {
     }
 
     fn hash_rows(&self, output: &BufferImpl<Digest>, matrix: &BufferImpl<BabyBearElem>) {
+        // Synchronize our stream before calling sppark to avoid conflicts
+        self.stream().synchronize().unwrap();
+
         let row_size = output.size();
         let col_size = matrix.size() / output.size();
         assert_eq!(matrix.size(), col_size * row_size);
@@ -245,6 +251,9 @@ impl CudaHash for CudaHashPoseidon254 {
     }
 
     fn hash_fold(&self, io: &BufferImpl<Digest>, output_size: usize) {
+        // Synchronize our stream before calling sppark to avoid conflicts
+        self.stream().synchronize().unwrap();
+
         let err = unsafe {
             let input = io.as_device_ptr_with_offset(2 * output_size);
             let output = io.as_device_ptr_with_offset(output_size);
@@ -256,6 +265,9 @@ impl CudaHash for CudaHashPoseidon254 {
     }
 
     fn hash_rows(&self, output: &BufferImpl<Digest>, matrix: &BufferImpl<BabyBearElem>) {
+        // Synchronize our stream before calling sppark to avoid conflicts
+        self.stream().synchronize().unwrap();
+
         let row_size = output.size();
         let col_size = matrix.size() / output.size();
         assert_eq!(matrix.size(), col_size * row_size);
@@ -890,6 +902,9 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         poly_count: usize,
         expand_bits: usize,
     ) {
+        // Synchronize our stream before calling sppark to avoid conflicts
+        self.stream().synchronize().unwrap();
+
         // batch_expand
         {
             let out_size = output.size() / poly_count;
@@ -936,6 +951,9 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
     }
 
     fn batch_interpolate_ntt(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
+        // Synchronize our stream before calling sppark to avoid conflicts
+        self.stream().synchronize().unwrap();
+
         let row_size = io.size() / count;
         assert_eq!(row_size * count, io.size());
         let n_bits = log2_ceil(row_size);
@@ -1069,8 +1087,13 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         let bits = log2_ceil(io.size() / poly_count);
         assert_eq!(io.size(), poly_count * (1 << bits));
 
-        // Note: sppark library manages its own streams, so we don't use our stream here
-        // to avoid conflicts with sppark's internal stream management
+        // Synchronize our stream before calling sppark to avoid conflicts
+        // sppark calls cudaDeviceSynchronize() which blocks ALL streams,
+        // so we need to ensure our stream operations complete first
+        self.stream().synchronize().unwrap();
+
+        // Note: sppark library manages its own streams and calls cudaDeviceSynchronize()
+        // which blocks all streams, so we don't use our stream here
         execute_kernel(|| {
             let err = unsafe {
                 sppark_batch_zk_shift(
