@@ -27,6 +27,7 @@ __device__ inline constexpr size_t log2Ceil(size_t in) {
 }
 
 // Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+// This increases warps per scheduler by limiting register usage
 __launch_bounds__(256, 8) __global__ void batch_bit_reverse(Fp* io, const uint32_t nBits, const uint32_t count) {
   uint totIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (totIdx < count) {
@@ -45,7 +46,7 @@ __launch_bounds__(256, 8) __global__ void batch_bit_reverse(Fp* io, const uint32
 }
 
 // Add launch bounds to improve occupancy - 256 threads with 6 blocks per SM
-// Uses shared memory so slightly lower min blocks to accommodate
+// Uses shared memory so slightly lower min blocks to accommodate shared memory requirements
 __launch_bounds__(256, 6) __global__ void batch_evaluate_any(
     FpExt* out, const Fp* coeffs, const uint32_t* which, const FpExt* xs, const uint32_t deg) {
   const Fp* cur_poly = coeffs + which[blockIdx.x] * deg;
