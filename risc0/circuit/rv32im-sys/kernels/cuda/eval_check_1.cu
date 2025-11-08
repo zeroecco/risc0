@@ -2535,11 +2535,12 @@ __device__ FpExt rv32im_v2_14(uint32_t idx,
 
   return x1239;
 }
+// Optimize for register usage - use __restrict__ to help compiler optimize
 __device__ FpExt rv32im_v2_10(uint32_t idx,
                               uint32_t size,
-                              Fp* arg0,
+                              Fp* __restrict__ arg0,
                               FpExt arg1,
-                              FpExt* arg2,
+                              FpExt* __restrict__ arg2,
                               FpExt arg3,
                               FpExt arg4,
                               FpExt arg5,
@@ -2564,10 +2565,12 @@ __device__ FpExt rv32im_v2_10(uint32_t idx,
                               FpExt arg24,
                               FpExt arg25,
                               FpExt arg26,
-                              const Fp* arg27,
-                              const Fp* arg28,
-                              const Fp* arg29) {
+                              const Fp* __restrict__ arg27,
+                              const Fp* __restrict__ arg28,
+                              const Fp* __restrict__ arg29) {
   uint32_t mask = size - 1;
+  // Precompute common index expressions for better register usage
+  uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
   Fp x0(1380248020);
   Fp x1(1608891156);
   Fp x2(1672219447);
@@ -3970,9 +3973,10 @@ __device__ FpExt rv32im_v2_10(uint32_t idx,
 
   return x1371;
 }
+// Optimize for register usage - use __restrict__ to help compiler optimize
 __device__ FpExt rv32im_v2_6(uint32_t idx,
                              uint32_t size,
-                             Fp* arg0,
+                             Fp* __restrict__ arg0,
                              FpExt arg1,
                              FpExt arg2,
                              FpExt arg3,
@@ -3981,11 +3985,13 @@ __device__ FpExt rv32im_v2_6(uint32_t idx,
                              FpExt arg6,
                              FpExt arg7,
                              FpExt arg8,
-                             FpExt* arg9,
-                             const Fp* arg10,
-                             const Fp* arg11,
-                             const Fp* arg12) {
+                             FpExt* __restrict__ arg9,
+                             const Fp* __restrict__ arg10,
+                             const Fp* __restrict__ arg11,
+                             const Fp* __restrict__ arg12) {
   uint32_t mask = size - 1;
+  // Precompute common index expressions for better register usage
+  uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
   Fp x0(1);
   Fp x1(128);
   Fp x2(64);
@@ -5189,15 +5195,18 @@ __device__ FpExt rv32im_v2_6(uint32_t idx,
 
   return x1156;
 }
+// Optimize for register usage - use __restrict__ to help compiler optimize
 __device__ FpExt rv32im_v2_2(uint32_t idx,
                              uint32_t size,
-                             FpExt* arg0,
+                             FpExt* __restrict__ arg0,
                              FpExt arg1,
                              FpExt arg2,
-                             const Fp* arg3,
-                             const Fp* arg4,
-                             const Fp* arg5) {
+                             const Fp* __restrict__ arg3,
+                             const Fp* __restrict__ arg4,
+                             const Fp* __restrict__ arg5) {
   uint32_t mask = size - 1;
+  // Precompute common index expressions for better register usage
+  uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
   FpExt x0{0, 1, 0, 0};
   FpExt x1{256, 0, 0, 0};
   FpExt x2{128, 0, 0, 0};

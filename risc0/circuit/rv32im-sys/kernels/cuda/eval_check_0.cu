@@ -2581,6 +2581,7 @@ __device__ FpExt rv32im_v2_11(uint32_t idx,
   uint32_t mask = size - 1;
   // Precompute common index expressions for better register usage
   uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
+  uint32_t base_idx_1 = (idx - INV_RATE * 1) & mask;
   Fp x0(1073741824);
   Fp x1(32);
   Fp x2(256);
@@ -3883,6 +3884,7 @@ __device__ FpExt rv32im_v2_7(uint32_t idx,
   uint32_t mask = size - 1;
   // Precompute common index expressions for better register usage
   uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
+  uint32_t base_idx_1 = (idx - INV_RATE * 1) & mask;
   Fp x0(15);
   Fp x1(256);
   Fp x2(128);
@@ -5283,6 +5285,7 @@ __device__ FpExt rv32im_v2_3(uint32_t idx,
   uint32_t mask = size - 1;
   // Precompute common index expressions for better register usage
   uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
+  uint32_t base_idx_1 = (idx - INV_RATE * 1) & mask;
   FpExt x0{128, 0, 0, 0};
   FpExt x1{1, 0, 0, 0};
   FpExt x2{0, 0, 0, 0};
