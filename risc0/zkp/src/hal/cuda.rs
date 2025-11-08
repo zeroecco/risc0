@@ -322,6 +322,11 @@ pub struct CudaHal<Hash: CudaHash + ?Sized> {
     hash: Option<Box<Hash>>,
     _context: Context,
     stream: Stream,
+    // Dedicated stream for sppark operations to isolate them from our main stream
+    // Note: sppark still calls cudaDeviceSynchronize() which blocks ALL streams,
+    // so this is a workaround until we fork sppark to remove blocking calls
+    #[allow(dead_code)]
+    sppark_stream: Stream,
     _lock: ReentrantMutexGuard<'static, ()>,
 }
 
@@ -733,10 +738,18 @@ impl<CH: CudaHash + ?Sized> CudaHal<CH> {
             .context("Failed to create CUDA stream")
             .unwrap();
 
+        // Create a dedicated stream for sppark operations
+        // This isolates sppark from our main stream, though sppark's internal
+        // cudaDeviceSynchronize() calls will still block all streams
+        let sppark_stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .context("Failed to create sppark CUDA stream")
+            .unwrap();
+
         let mut hal = Self {
             max_threads: max_threads as u32,
             _context: context,
             stream,
+            sppark_stream,
             hash: None,
             _lock,
         };
@@ -1056,8 +1069,9 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         let bits = log2_ceil(io.size() / poly_count);
         assert_eq!(io.size(), poly_count * (1 << bits));
 
-        // Use stream for async kernel execution
-        execute_kernel_with_stream(self.stream(), || {
+        // Note: sppark library manages its own streams, so we don't use our stream here
+        // to avoid conflicts with sppark's internal stream management
+        execute_kernel(|| {
             let err = unsafe {
                 sppark_batch_zk_shift(
                     io.as_device_ptr(),

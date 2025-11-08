@@ -13,8 +13,15 @@ extern "C" RustError::by_value
 sppark_poseidon2_fold(poseidon_out_t* d_out, const poseidon_in_t* d_in, size_t num_hashes) {
   const gpu_t& gpu = select_gpu();
 
-  size_t block_size = num_hashes < 256 ? num_hashes : 256;
-  size_t num_blocks = num_hashes < 256 ? 1 : num_hashes / 256;
+  // Use at least one block per multiprocessor for better GPU utilization
+  // Similar to poseidon254_fold, but with block_size=256 to match kernel launch_bounds
+  size_t block_size = 256;
+  size_t num_blocks = gpu.sm_count();
+
+  // Adjust if we have more work than blocks can handle
+  if (num_hashes > num_blocks * block_size) {
+    num_blocks = (num_hashes + block_size - 1) / block_size;
+  }
 
   try {
     CUDA_OK(cudaDeviceSynchronize());
@@ -36,8 +43,14 @@ extern "C" RustError::by_value
 sppark_poseidon2_rows(poseidon_out_t* d_out, const fr_t* d_in, uint32_t count, uint32_t col_size) {
   const gpu_t& gpu = select_gpu();
 
-  size_t block_size = count < 256 ? count : 256;
-  size_t num_blocks = (count + block_size - 1) / block_size;
+  // Use at least one block per multiprocessor for better GPU utilization
+  size_t block_size = 256;
+  size_t num_blocks = gpu.sm_count();
+
+  // Adjust if we have more work than blocks can handle
+  if (count > num_blocks * block_size) {
+    num_blocks = (count + block_size - 1) / block_size;
+  }
 
   try {
     CUDA_OK(cudaDeviceSynchronize());

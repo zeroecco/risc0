@@ -27,7 +27,9 @@ __device__ FpExt poly_fp(uint32_t idx,
                          const Fp* mix,
                          const Fp* accum);
 
-__global__ void eval_check(Fp* check,
+// Use launch bounds to limit register usage and improve occupancy
+// 128 threads per block allows 4 blocks per SM, improving from 16.7% to ~50% occupancy
+__launch_bounds__(128, 4) __global__ void eval_check(Fp* check,
                            const Fp* ctrl,
                            const Fp* data,
                            const Fp* accum,
@@ -65,9 +67,11 @@ extern "C" const char* risc0_circuit_recursion_cuda_eval_check(Fp* check,
   try {
     CUDA_OK(cudaDeviceSynchronize());
     CudaStream stream;
-    LaunchConfig cfg = getSimpleConfig(domain);
+    // Use 128 threads per block to match __launch_bounds__ for better occupancy
+    constexpr int block_size = 128;
+    int grid_size = (domain + block_size - 1) / block_size;
     cudaMemcpyToSymbol(poly_mix, poly_mix_pows, sizeof(poly_mix));
-    risc0::circuit::recursion::cuda::eval_check<<<cfg.grid, cfg.block, 0, stream>>>(
+    risc0::circuit::recursion::cuda::eval_check<<<grid_size, block_size, 0, stream>>>(
         check, ctrl, data, accum, mix, out, rou, po2, domain);
     CUDA_OK(cudaStreamSynchronize(stream));
   } catch (const std::exception& err) {

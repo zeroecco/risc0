@@ -112,6 +112,9 @@ __device__ __forceinline__ void poseidon2_mix(fr_t cells[CELLS]) {
 __launch_bounds__(256, 4) __global__
     void _poseidon2_fold(poseidon_out_t* output, const poseidon_in_t* input, uint32_t output_size) {
   uint32_t gid = blockDim.x * blockIdx.x + threadIdx.x;
+  if (gid >= output_size)
+    return;
+
   fr_t cells[CELLS];
 #pragma unroll
   for (uint32_t i = 0; i < CELLS; i++) {
