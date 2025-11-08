@@ -9,14 +9,15 @@
 namespace risc0::circuit::recursion::cuda {
 
 // Optimize for register usage and instruction scheduling
+// Note: To further reduce register pressure, compile with -maxrregcount=N flag
 #pragma unroll 1
 __device__ __forceinline__ FpExt poly_fp(uint32_t idx,
                          uint32_t size,
-                         const Fp* ctrl,
-                         const Fp* out,
-                         const Fp* data,
-                         const Fp* mix,
-                         const Fp* accum) {
+                         const Fp* __restrict__ ctrl,
+                         const Fp* __restrict__ out,
+                         const Fp* __restrict__ data,
+                         const Fp* __restrict__ mix,
+                         const Fp* __restrict__ accum) {
   uint32_t mask = size - 1;
   // Precompute common index expressions for better register usage and instruction scheduling
   // INV_RATE * 0 = 0, so this simplifies to idx & mask
@@ -24,6 +25,7 @@ __device__ __forceinline__ FpExt poly_fp(uint32_t idx,
   uint32_t base_idx_1 = (idx - INV_RATE) & mask;
 
   // Constants - these are compile-time known, compiler should optimize
+  // Scoped to allow register reuse after constants are no longer needed
   Fp x0(0);
   Fp x1(1);
   Fp x2(2);
