@@ -145,8 +145,10 @@ static void poseidon_mix(fr_t state[CELLS_254], const poseidon254_blob& s_const)
   }
 }
 
+// Increase minimum blocks per SM to 6 to allow more warps per scheduler
+// 512 threads with 6 blocks per SM improves occupancy by limiting register usage
 template<typename bn254_t>
-__global__ __launch_bounds__(512)
+__global__ __launch_bounds__(512, 6)
 void _poseidon254_rows(bn254_t out[/*row_size*/], const fr_t matrix[/*row_size * col_size*/],
                        size_t row_size, uint32_t col_size)
 {
@@ -192,8 +194,9 @@ void _poseidon254_rows(bn254_t out[/*row_size*/], const fr_t matrix[/*row_size *
   }
 }
 
+// Increase minimum blocks per SM to 6 to allow more warps per scheduler
 template<typename bn254_t>
-__global__ __launch_bounds__(512)
+__global__ __launch_bounds__(512, 6)
 void _poseidon254_fold(bn254_t out[/*out_size*/], const bn254_t in[/*2 * out_size*/],
                        size_t out_size)
 {

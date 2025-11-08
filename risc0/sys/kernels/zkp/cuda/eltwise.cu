@@ -15,21 +15,24 @@
 #include "fp.h"
 #include "fpext.h"
 
-__global__ void eltwise_add_fp(Fp* out, const Fp* x, const Fp* y, const uint32_t count) {
+// Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+__launch_bounds__(256, 8) __global__ void eltwise_add_fp(Fp* out, const Fp* x, const Fp* y, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < count) {
     out[idx] = x[idx] + y[idx];
   }
 }
 
-__global__ void eltwise_mul_factor_fp(Fp* io, Fp factor, const uint32_t count) {
+// Add launch bounds to improve occupancy
+__launch_bounds__(256, 8) __global__ void eltwise_mul_factor_fp(Fp* io, Fp factor, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < count) {
     io[idx] = io[idx] * factor;
   }
 }
 
-__global__ void eltwise_copy_fp(Fp* out, const Fp* in, const uint32_t count) {
+// Add launch bounds to improve occupancy
+__launch_bounds__(256, 8) __global__ void eltwise_copy_fp(Fp* out, const Fp* in, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   // If the following check is not included, there is a SIGABRT that causes tests to fail
   // cuda-memcheck also throws lots of out of bounds read errors if this check is omitted
@@ -38,7 +41,8 @@ __global__ void eltwise_copy_fp(Fp* out, const Fp* in, const uint32_t count) {
   }
 }
 
-__global__ void eltwise_copy_fp_region(Fp* into,
+// Add launch bounds to improve occupancy
+__launch_bounds__(256, 8) __global__ void eltwise_copy_fp_region(Fp* into,
                                        const Fp* from,
                                        const uint32_t fromRows,
                                        const uint32_t fromCols,
@@ -54,7 +58,8 @@ __global__ void eltwise_copy_fp_region(Fp* into,
   }
 }
 
-__global__ void
+// Add launch bounds to improve occupancy
+__launch_bounds__(256, 8) __global__ void
 eltwise_sum_fpext(Fp* out, const FpExt* in, const uint32_t to_add, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < count) {
@@ -69,7 +74,8 @@ eltwise_sum_fpext(Fp* out, const FpExt* in, const uint32_t to_add, const uint32_
   }
 }
 
-__global__ void eltwise_zeroize_fp(Fp* elems, const uint32_t count) {
+// Add launch bounds to improve occupancy
+__launch_bounds__(256, 8) __global__ void eltwise_zeroize_fp(Fp* elems, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < count) {
     Fp val = elems[idx];
@@ -77,7 +83,8 @@ __global__ void eltwise_zeroize_fp(Fp* elems, const uint32_t count) {
   }
 }
 
-__global__ void eltwise_zeroize_fpext(FpExt* elems, const uint32_t count) {
+// Add launch bounds to improve occupancy
+__launch_bounds__(256, 8) __global__ void eltwise_zeroize_fpext(FpExt* elems, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < count) {
     FpExt val = elems[idx];

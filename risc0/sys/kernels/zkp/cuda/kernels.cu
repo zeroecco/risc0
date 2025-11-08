@@ -26,7 +26,8 @@ __device__ inline constexpr size_t log2Ceil(size_t in) {
   return r;
 }
 
-__global__ void batch_bit_reverse(Fp* io, const uint32_t nBits, const uint32_t count) {
+// Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+__launch_bounds__(256, 8) __global__ void batch_bit_reverse(Fp* io, const uint32_t nBits, const uint32_t count) {
   uint totIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (totIdx < count) {
     uint32_t rowSize = 1 << nBits;
@@ -43,7 +44,9 @@ __global__ void batch_bit_reverse(Fp* io, const uint32_t nBits, const uint32_t c
   }
 }
 
-__global__ void batch_evaluate_any(
+// Add launch bounds to improve occupancy - 256 threads with 6 blocks per SM
+// Uses shared memory so slightly lower min blocks to accommodate
+__launch_bounds__(256, 6) __global__ void batch_evaluate_any(
     FpExt* out, const Fp* coeffs, const uint32_t* which, const FpExt* xs, const uint32_t deg) {
   const Fp* cur_poly = coeffs + which[blockIdx.x] * deg;
   FpExt x = xs[blockIdx.x];
@@ -71,7 +74,8 @@ __global__ void batch_evaluate_any(
   }
 }
 
-__global__ void fri_fold(Fp* out, const Fp* in, const FpExt* mix, const uint32_t count) {
+// Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+__launch_bounds__(256, 8) __global__ void fri_fold(Fp* out, const Fp* in, const FpExt* mix, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < count) {
     FpExt tot;
@@ -92,7 +96,8 @@ __global__ void fri_fold(Fp* out, const Fp* in, const FpExt* mix, const uint32_t
   }
 }
 
-__global__ void gather_sample(
+// Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+__launch_bounds__(256, 8) __global__ void gather_sample(
     Fp* dst, const Fp* src, const uint32_t idx, const uint32_t size, const uint32_t stride) {
   uint gid = blockIdx.x * blockDim.x + threadIdx.x;
   if (gid < size) {
@@ -100,7 +105,8 @@ __global__ void gather_sample(
   }
 }
 
-__global__ void scatter(Fp* into,
+// Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+__launch_bounds__(256, 8) __global__ void scatter(Fp* into,
                         const uint32_t* index,
                         const uint32_t* offsets,
                         const Fp* values,
@@ -113,7 +119,8 @@ __global__ void scatter(Fp* into,
   }
 }
 
-__global__ void mix_poly_coeffs(FpExt* out,
+// Add launch bounds to improve occupancy - 256 threads with 8 blocks per SM
+__launch_bounds__(256, 8) __global__ void mix_poly_coeffs(FpExt* out,
                                 const Fp* in,
                                 const uint32_t* combos,
                                 const FpExt* mixStart,

@@ -109,7 +109,9 @@ __device__ __forceinline__ void poseidon2_mix(fr_t cells[CELLS]) {
 
 } // namespace poseidon2
 
-__launch_bounds__(256, 4) __global__
+// Increase minimum blocks per SM to 8 to allow more warps per scheduler
+// This improves occupancy by limiting register usage and enabling more concurrent warps
+__launch_bounds__(256, 8) __global__
     void _poseidon2_fold(poseidon_out_t* output, const poseidon_in_t* input, uint32_t output_size) {
   uint32_t gid = blockDim.x * blockIdx.x + threadIdx.x;
   if (gid >= output_size)
@@ -137,7 +139,8 @@ __launch_bounds__(256, 4) __global__
   output[gid] = tmp;
 }
 
-__launch_bounds__(256, 4) __global__
+// Increase minimum blocks per SM to 8 to allow more warps per scheduler
+__launch_bounds__(256, 8) __global__
     void _poseidon2_rows(poseidon_out_t* out, const fr_t* matrix, uint32_t dim_x, uint32_t dim_y) {
   uint32_t gid = blockDim.x * blockIdx.x + threadIdx.x;
   if (gid >= dim_x)

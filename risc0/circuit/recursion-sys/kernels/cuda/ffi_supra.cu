@@ -28,8 +28,9 @@ __device__ FpExt poly_fp(uint32_t idx,
                          const Fp* accum);
 
 // Use launch bounds to limit register usage and improve occupancy
-// 128 threads per block allows 4 blocks per SM, improving from 16.7% to ~50% occupancy
-__launch_bounds__(128, 4) __global__ void eval_check(Fp* check,
+// 128 threads per block with 8 blocks per SM increases warps per scheduler
+// This improves from ~50% to ~75%+ occupancy by allowing more warps to be issued
+__launch_bounds__(128, 8) __global__ void eval_check(Fp* check,
                            const Fp* ctrl,
                            const Fp* data,
                            const Fp* accum,

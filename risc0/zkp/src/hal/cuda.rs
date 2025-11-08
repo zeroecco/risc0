@@ -71,8 +71,6 @@ extern "C" {
 
     #[allow(dead_code)]
     fn cudaStreamSynchronize(stream: *mut std::os::raw::c_void) -> std::os::raw::c_int;
-
-    fn cudaDeviceSynchronize() -> std::os::raw::c_int;
 }
 
 #[repr(u32)]
@@ -202,16 +200,6 @@ impl CudaHash for CudaHashPoseidon2 {
     }
 
     fn hash_fold(&self, io: &BufferImpl<Digest>, output_size: usize) {
-        // Synchronize all streams before calling sppark to avoid conflicts
-        // sppark calls cudaDeviceSynchronize() which blocks ALL streams,
-        // so we synchronize explicitly to ensure our operations complete first
-        unsafe {
-            let err = cudaDeviceSynchronize();
-            if err != 0 {
-                panic!("cudaDeviceSynchronize failed: {}", err);
-            }
-        }
-
         let err = unsafe {
             let input = io.as_device_ptr_with_offset(2 * output_size);
             let output = io.as_device_ptr_with_offset(output_size);
@@ -223,14 +211,6 @@ impl CudaHash for CudaHashPoseidon2 {
     }
 
     fn hash_rows(&self, output: &BufferImpl<Digest>, matrix: &BufferImpl<BabyBearElem>) {
-        // Synchronize all streams before calling sppark to avoid conflicts
-        unsafe {
-            let err = cudaDeviceSynchronize();
-            if err != 0 {
-                panic!("cudaDeviceSynchronize failed: {}", err);
-            }
-        }
-
         let row_size = output.size();
         let col_size = matrix.size() / output.size();
         assert_eq!(matrix.size(), col_size * row_size);
@@ -265,14 +245,6 @@ impl CudaHash for CudaHashPoseidon254 {
     }
 
     fn hash_fold(&self, io: &BufferImpl<Digest>, output_size: usize) {
-        // Synchronize all streams before calling sppark to avoid conflicts
-        unsafe {
-            let err = cudaDeviceSynchronize();
-            if err != 0 {
-                panic!("cudaDeviceSynchronize failed: {}", err);
-            }
-        }
-
         let err = unsafe {
             let input = io.as_device_ptr_with_offset(2 * output_size);
             let output = io.as_device_ptr_with_offset(output_size);
@@ -284,14 +256,6 @@ impl CudaHash for CudaHashPoseidon254 {
     }
 
     fn hash_rows(&self, output: &BufferImpl<Digest>, matrix: &BufferImpl<BabyBearElem>) {
-        // Synchronize all streams before calling sppark to avoid conflicts
-        unsafe {
-            let err = cudaDeviceSynchronize();
-            if err != 0 {
-                panic!("cudaDeviceSynchronize failed: {}", err);
-            }
-        }
-
         let row_size = output.size();
         let col_size = matrix.size() / output.size();
         assert_eq!(matrix.size(), col_size * row_size);
