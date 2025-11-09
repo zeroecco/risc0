@@ -21,33 +21,71 @@ __device__ FpExt rv32im_v2_18(uint32_t idx,
                               const Fp* arg7,
                               const Fp* arg8) {
   uint32_t mask = size - 1;
-  Fp x0(19);
-  Fp x1(2013235201);
-  Fp x2(131070);
-  Fp x3(131072);
-  Fp x4(65536);
-  Fp x5(16777216);
-  Fp x6(1006632961);
-  Fp x7(51);
-  Fp x8(8);
-  Fp x9(256);
-  Fp x10(1024);
-  Fp x11(4096);
-  Fp x12(16384);
-  Fp x13(16);
-  Fp x14(32);
-  Fp x15(128);
-  Fp x16(512);
-  Fp x17(2048);
-  Fp x18(8192);
-  Fp x19(32768);
-  Fp x20(2013265920);
-  Fp x21(4);
-  Fp x22(3);
-  Fp x23(2);
-  Fp x24(0);
-  Fp x25(64);
-  Fp x26(1);
+  // Precompute common index expressions for better register usage
+  uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
+
+  // Use shared memory for constants to reduce per-thread register pressure
+  // Thread 0 loads constants once, all threads read from shared memory
+  __shared__ Fp shared_constants[27];
+  if (threadIdx.x == 0) {
+    shared_constants[0] = Fp(19);         // x0
+    shared_constants[1] = Fp(2013235201); // x1
+    shared_constants[2] = Fp(131070);     // x2
+    shared_constants[3] = Fp(131072);     // x3
+    shared_constants[4] = Fp(65536);      // x4
+    shared_constants[5] = Fp(16777216);   // x5
+    shared_constants[6] = Fp(1006632961); // x6
+    shared_constants[7] = Fp(51);         // x7
+    shared_constants[8] = Fp(8);         // x8
+    shared_constants[9] = Fp(256);       // x9
+    shared_constants[10] = Fp(1024);    // x10
+    shared_constants[11] = Fp(4096);    // x11
+    shared_constants[12] = Fp(16384);   // x12
+    shared_constants[13] = Fp(16);      // x13
+    shared_constants[14] = Fp(32);      // x14
+    shared_constants[15] = Fp(128);     // x15
+    shared_constants[16] = Fp(512);     // x16
+    shared_constants[17] = Fp(2048);    // x17
+    shared_constants[18] = Fp(8192);   // x18
+    shared_constants[19] = Fp(32768);   // x19
+    shared_constants[20] = Fp(2013265920); // x20
+    shared_constants[21] = Fp(4);       // x21
+    shared_constants[22] = Fp(3);       // x22
+    shared_constants[23] = Fp(2);       // x23
+    shared_constants[24] = Fp(0);       // x24
+    shared_constants[25] = Fp(64);      // x25
+    shared_constants[26] = Fp(1);       // x26
+  }
+  __syncthreads();
+
+  // All threads read from shared memory (saves ~27 registers per thread)
+  const Fp& x0 = shared_constants[0];
+  const Fp& x1 = shared_constants[1];
+  const Fp& x2 = shared_constants[2];
+  const Fp& x3 = shared_constants[3];
+  const Fp& x4 = shared_constants[4];
+  const Fp& x5 = shared_constants[5];
+  const Fp& x6 = shared_constants[6];
+  const Fp& x7 = shared_constants[7];
+  const Fp& x8 = shared_constants[8];
+  const Fp& x9 = shared_constants[9];
+  const Fp& x10 = shared_constants[10];
+  const Fp& x11 = shared_constants[11];
+  const Fp& x12 = shared_constants[12];
+  const Fp& x13 = shared_constants[13];
+  const Fp& x14 = shared_constants[14];
+  const Fp& x15 = shared_constants[15];
+  const Fp& x16 = shared_constants[16];
+  const Fp& x17 = shared_constants[17];
+  const Fp& x18 = shared_constants[18];
+  const Fp& x19 = shared_constants[19];
+  const Fp& x20 = shared_constants[20];
+  const Fp& x21 = shared_constants[21];
+  const Fp& x22 = shared_constants[22];
+  const Fp& x23 = shared_constants[23];
+  const Fp& x24 = shared_constants[24];
+  const Fp& x25 = shared_constants[25];
+  const Fp& x26 = shared_constants[26];
   Fp x27 = arg5[21 * size + ((idx - INV_RATE * 0) & mask)];
   Fp x28 = arg5[22 * size + ((idx - INV_RATE * 0) & mask)];
   Fp x29 = arg5[23 * size + ((idx - INV_RATE * 0) & mask)];
@@ -223,16 +261,11 @@ __device__ FpExt rv32im_v2_18(uint32_t idx,
   Fp x199 = x198 * x30;
   Fp x200 = arg0[112];
   Fp x201 = x200 * x31;
-  Fp x202 = x184 + x190;
-  Fp x203 = x202 + x195;
-  Fp x204 = x203 + x199;
-  Fp x205 = x204 + x201;
+  // Optimized: collapse single-use intermediate chain to reduce register pressure
   Fp x206 = arg0[113];
-  Fp x207 = x205 + x206;
   Fp x208 = arg0[114];
-  Fp x209 = x207 + x208;
   Fp x210 = arg0[115];
-  Fp x211 = x209 + x210;
+  Fp x211 = x184 + x190 + x195 + x199 + x201 + x206 + x208 + x210;
   Fp x212 = arg0[116];
   Fp x213 = x177 * x212;
   Fp x214 = arg0[94];
@@ -252,16 +285,11 @@ __device__ FpExt rv32im_v2_18(uint32_t idx,
   Fp x228 = x227 * x30;
   Fp x229 = arg0[118];
   Fp x230 = x229 * x31;
-  Fp x231 = x217 + x221;
-  Fp x232 = x231 + x225;
-  Fp x233 = x232 + x228;
-  Fp x234 = x233 + x230;
+  // Optimized: collapse single-use intermediate chain to reduce register pressure
   Fp x235 = arg0[119];
-  Fp x236 = x234 + x235;
   Fp x237 = arg0[120];
-  Fp x238 = x236 + x237;
   Fp x239 = arg0[121];
-  Fp x240 = x238 + x239;
+  Fp x240 = x217 + x221 + x225 + x228 + x230 + x235 + x237 + x239;
   Fp x241 = arg0[122];
   FpExt x242 = arg1 + poly_mix[153] * x241;
   Fp x243 = arg0[123];
@@ -309,9 +337,8 @@ __device__ FpExt rv32im_v2_18(uint32_t idx,
   Fp x285 = x26 - x282;
   Fp x286 = x285 * x25;
   Fp x287 = arg0[79];
-  Fp x288 = x287 + x286;
-  Fp x289 = x288 + x284;
-  Fp x290 = x289 - x34;
+  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  Fp x290 = (x287 + x286 + x284) - x34;
   FpExt x291 = x279 + poly_mix[169] * x290;
   Fp x292 = arg0[141];
   FpExt x293 = x291 + poly_mix[170] * x292;

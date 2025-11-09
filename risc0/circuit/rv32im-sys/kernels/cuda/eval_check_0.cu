@@ -24,37 +24,78 @@ __device__ FpExt rv32im_v2_19(uint32_t idx,
                               const Fp* arg10,
                               const Fp* arg11) {
   uint32_t mask = size - 1;
-  Fp x0(115);
-  Fp x1(23);
-  Fp x2(55);
-  Fp x3(103);
-  Fp x4(111);
-  Fp x5(5);
-  Fp x6(65520);
-  Fp x7(99);
-  Fp x8(0);
-  Fp x9(2013265920);
-  Fp x10(16384);
-  Fp x11(8192);
-  Fp x12(4096);
-  Fp x13(2048);
-  Fp x14(1024);
-  Fp x15(512);
-  Fp x16(256);
-  Fp x17(128);
-  Fp x18(64);
-  Fp x19(32);
-  Fp x20(16);
-  Fp x21(8);
-  Fp x22(4);
-  Fp x23(19);
-  Fp x24(3);
-  Fp x25(1006632961);
-  Fp x26(32768);
-  Fp x27(1);
-  Fp x28(65535);
-  Fp x29(65536);
-  Fp x30(2);
+  // Precompute common index expressions for better register usage
+  uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
+
+  // Use shared memory for constants to reduce per-thread register pressure
+  // Thread 0 loads constants once, all threads read from shared memory
+  __shared__ Fp shared_constants[30];
+  if (threadIdx.x == 0) {
+    shared_constants[0] = Fp(115);        // x0
+    shared_constants[1] = Fp(23);         // x1
+    shared_constants[2] = Fp(55);         // x2
+    shared_constants[3] = Fp(103);        // x3
+    shared_constants[4] = Fp(111);        // x4
+    shared_constants[5] = Fp(5);          // x5
+    shared_constants[6] = Fp(65520);      // x6
+    shared_constants[7] = Fp(99);         // x7
+    shared_constants[8] = Fp(0);          // x8
+    shared_constants[9] = Fp(2013265920); // x9
+    shared_constants[10] = Fp(16384);    // x10
+    shared_constants[11] = Fp(8192);     // x11
+    shared_constants[12] = Fp(4096);     // x12
+    shared_constants[13] = Fp(2048);     // x13
+    shared_constants[14] = Fp(1024);     // x14
+    shared_constants[15] = Fp(512);      // x15
+    shared_constants[16] = Fp(256);      // x16
+    shared_constants[17] = Fp(128);      // x17
+    shared_constants[18] = Fp(64);       // x18
+    shared_constants[19] = Fp(32);       // x19
+    shared_constants[20] = Fp(16);       // x20
+    shared_constants[21] = Fp(8);        // x21
+    shared_constants[22] = Fp(4);        // x22
+    shared_constants[23] = Fp(19);       // x23
+    shared_constants[24] = Fp(3);       // x24
+    shared_constants[25] = Fp(1006632961); // x25
+    shared_constants[26] = Fp(32768);    // x26
+    shared_constants[27] = Fp(1);       // x27
+    shared_constants[28] = Fp(65535);    // x28
+    shared_constants[29] = Fp(65536);    // x29
+  }
+  __syncthreads();
+
+  // All threads read from shared memory (saves ~30 registers per thread)
+  const Fp& x0 = shared_constants[0];
+  const Fp& x1 = shared_constants[1];
+  const Fp& x2 = shared_constants[2];
+  const Fp& x3 = shared_constants[3];
+  const Fp& x4 = shared_constants[4];
+  const Fp& x5 = shared_constants[5];
+  const Fp& x6 = shared_constants[6];
+  const Fp& x7 = shared_constants[7];
+  const Fp& x8 = shared_constants[8];
+  const Fp& x9 = shared_constants[9];
+  const Fp& x10 = shared_constants[10];
+  const Fp& x11 = shared_constants[11];
+  const Fp& x12 = shared_constants[12];
+  const Fp& x13 = shared_constants[13];
+  const Fp& x14 = shared_constants[14];
+  const Fp& x15 = shared_constants[15];
+  const Fp& x16 = shared_constants[16];
+  const Fp& x17 = shared_constants[17];
+  const Fp& x18 = shared_constants[18];
+  const Fp& x19 = shared_constants[19];
+  const Fp& x20 = shared_constants[20];
+  const Fp& x21 = shared_constants[21];
+  const Fp& x22 = shared_constants[22];
+  const Fp& x23 = shared_constants[23];
+  const Fp& x24 = shared_constants[24];
+  const Fp& x25 = shared_constants[25];
+  const Fp& x26 = shared_constants[26];
+  const Fp& x27 = shared_constants[27];
+  const Fp& x28 = shared_constants[28];
+  const Fp& x29 = shared_constants[29];
+  const Fp x30(2);
   Fp x31 = arg8[29 * size + ((idx - INV_RATE * 0) & mask)];
   Fp x32 = arg8[31 * size + ((idx - INV_RATE * 0) & mask)];
   Fp x33 = arg8[33 * size + ((idx - INV_RATE * 0) & mask)];
@@ -451,21 +492,7 @@ __device__ FpExt rv32im_v2_19(uint32_t idx,
   Fp x412 = x397 * x11;
   Fp x413 = x398 * x10;
   Fp x414 = x399 * x26;
-  Fp x415 = x384 + x400;
-  Fp x416 = x415 + x401;
-  Fp x417 = x416 + x402;
-  Fp x418 = x417 + x403;
-  Fp x419 = x418 + x404;
-  Fp x420 = x419 + x405;
-  Fp x421 = x420 + x406;
-  Fp x422 = x421 + x407;
-  Fp x423 = x422 + x408;
-  Fp x424 = x423 + x409;
-  Fp x425 = x424 + x410;
-  Fp x426 = x425 + x411;
-  Fp x427 = x426 + x412;
-  Fp x428 = x427 + x413;
-  Fp x429 = x428 + x414;
+  Fp x429 = x384 + x400 + x401 + x402 + x403 + x404 + x405 + x406 + x407 + x408 + x409 + x410 + x411 + x412 + x413 + x414;
   Fp x430 = x429 * x30;
   Fp x431 = x381 - x430;
   Fp x432 = x431 * x91;
@@ -6877,19 +6904,8 @@ __device__ FpExt poly_fp(uint32_t idx,
   Fp x304 = x31 - x64;
   Fp x305 = x64 * x304;
   FpExt x306 = x303 + poly_mix[26] * x305;
-  Fp x307 = x52 + x53;
-  Fp x308 = x307 + x54;
-  Fp x309 = x308 + x55;
-  Fp x310 = x309 + x56;
-  Fp x311 = x310 + x57;
-  Fp x312 = x311 + x58;
-  Fp x313 = x312 + x59;
-  Fp x314 = x313 + x60;
-  Fp x315 = x314 + x61;
-  Fp x316 = x315 + x62;
-  Fp x317 = x316 + x63;
-  Fp x318 = x317 + x64;
-  Fp x319 = x318 - x31;
+  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  Fp x319 = (x52 + x53 + x54 + x55 + x56 + x57 + x58 + x59 + x60 + x61 + x62 + x63 + x64) - x31;
   FpExt x320 = x306 + poly_mix[27] * x319;
   Fp x321 = x54 * x25;
   Fp x322 = x55 * x26;
@@ -6904,16 +6920,8 @@ __device__ FpExt poly_fp(uint32_t idx,
   Fp x331 = x64 * x24;
   Fp x332 = x53 + x321;
   Fp x333 = x332 + x322;
-  Fp x334 = x333 + x323;
-  Fp x335 = x334 + x324;
-  Fp x336 = x335 + x325;
-  Fp x337 = x336 + x326;
-  Fp x338 = x337 + x327;
-  Fp x339 = x338 + x328;
-  Fp x340 = x339 + x329;
-  Fp x341 = x340 + x330;
-  Fp x342 = x341 + x331;
-  Fp x343 = x342 - x42;
+  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  Fp x343 = (x333 + x323 + x324 + x325 + x326 + x327 + x328 + x329 + x330 + x331) - x42;
   FpExt x344 = x320 + poly_mix[28] * x343;
   Fp x345 = x218 - x19;
   x33[150] = x345;
