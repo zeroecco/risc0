@@ -9,7 +9,7 @@
 
 namespace risc0::circuit::rv32im_v2::cuda {
 
-__device__ FpExt rv32im_v2_18(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_18(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -1271,7 +1271,7 @@ __device__ FpExt rv32im_v2_18(uint32_t idx,
 
   return x1171;
 }
-__device__ FpExt rv32im_v2_14(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_14(uint32_t idx,
                               uint32_t size,
                               FpExt arg0,
                               FpExt arg1,
@@ -2556,7 +2556,7 @@ __device__ FpExt rv32im_v2_14(uint32_t idx,
 
   return x1239;
 }
-__device__ FpExt rv32im_v2_10(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_10(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -3991,7 +3991,7 @@ __device__ FpExt rv32im_v2_10(uint32_t idx,
 
   return x1371;
 }
-__device__ FpExt rv32im_v2_6(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_6(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -5210,7 +5210,7 @@ __device__ FpExt rv32im_v2_6(uint32_t idx,
 
   return x1156;
 }
-__device__ FpExt rv32im_v2_2(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_2(uint32_t idx,
                              uint32_t size,
                              FpExt* arg0,
                              FpExt arg1,

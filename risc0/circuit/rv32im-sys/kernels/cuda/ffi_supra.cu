@@ -23,15 +23,17 @@ namespace risc0::circuit::rv32im_v2::cuda {
 
 __constant__ FpExt poly_mix[kNumPolyMixPows];
 
-__global__ void eval_check(Fp* check,
-                           const Fp* ctrl,
-                           const Fp* data,
-                           const Fp* accum,
-                           const Fp* mix,
-                           const Fp* out,
-                           const Fp rou,
-                           uint32_t po2,
-                           uint32_t domain) {
+// __launch_bounds__(256, 2) forces max 256 threads/block and min 2 blocks/SM
+// This limits register usage to ~64 registers per thread, improving occupancy
+__global__ __launch_bounds__(256, 2) void eval_check(Fp* check,
+                                                      const Fp* ctrl,
+                                                      const Fp* data,
+                                                      const Fp* accum,
+                                                      const Fp* mix,
+                                                      const Fp* out,
+                                                      const Fp rou,
+                                                      uint32_t po2,
+                                                      uint32_t domain) {
   uint32_t cycle = blockDim.x * blockIdx.x + threadIdx.x;
   if (cycle < domain) {
     FpExt tot = poly_fp(cycle, domain, ctrl, out, data, mix, accum);

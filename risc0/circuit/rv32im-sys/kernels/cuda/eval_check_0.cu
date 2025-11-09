@@ -9,20 +9,21 @@
 
 namespace risc0::circuit::rv32im_v2::cuda {
 
-__device__ FpExt rv32im_v2_19(uint32_t idx,
-                              uint32_t size,
-                              Fp* arg0,
-                              FpExt arg1,
-                              FpExt arg2,
-                              FpExt arg3,
-                              FpExt arg4,
-                              FpExt arg5,
-                              FpExt arg6,
-                              FpExt* arg7,
-                              const Fp* arg8,
-                              const Fp* arg9,
-                              const Fp* arg10,
-                              const Fp* arg11) {
+// __launch_bounds__ limits register usage in device functions
+__device__ __launch_bounds__(256) FpExt rv32im_v2_19(uint32_t idx,
+                                                     uint32_t size,
+                                                     Fp* arg0,
+                                                     FpExt arg1,
+                                                     FpExt arg2,
+                                                     FpExt arg3,
+                                                     FpExt arg4,
+                                                     FpExt arg5,
+                                                     FpExt arg6,
+                                                     FpExt* arg7,
+                                                     const Fp* arg8,
+                                                     const Fp* arg9,
+                                                     const Fp* arg10,
+                                                     const Fp* arg11) {
   uint32_t mask = size - 1;
   // Precompute common index expressions for better register usage
   uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
@@ -1262,7 +1263,7 @@ __device__ FpExt rv32im_v2_19(uint32_t idx,
 
   return x1157;
 }
-__device__ FpExt rv32im_v2_15(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_15(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -2583,7 +2584,7 @@ __device__ FpExt rv32im_v2_15(uint32_t idx,
 
   return x1209;
 }
-__device__ FpExt rv32im_v2_11(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_11(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -3883,7 +3884,7 @@ __device__ FpExt rv32im_v2_11(uint32_t idx,
 
   return x1204;
 }
-__device__ FpExt rv32im_v2_7(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_7(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -5282,7 +5283,7 @@ __device__ FpExt rv32im_v2_7(uint32_t idx,
 
   return x1292;
 }
-__device__ FpExt rv32im_v2_3(uint32_t idx,
+__device__ __launch_bounds__(256) FpExt rv32im_v2_3(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -6580,47 +6581,89 @@ __device__ FpExt rv32im_v2_3(uint32_t idx,
 
   return x1255;
 }
-__device__ FpExt poly_fp(uint32_t idx,
-                         uint32_t size,
-                         const Fp* ctrl,
-                         const Fp* out,
-                         const Fp* data,
-                         const Fp* mix,
-                         const Fp* accum) {
+// __launch_bounds__ limits register usage - critical for this large function
+__device__ __launch_bounds__(256) FpExt poly_fp(uint32_t idx,
+                                                uint32_t size,
+                                                const Fp* ctrl,
+                                                const Fp* out,
+                                                const Fp* data,
+                                                const Fp* mix,
+                                                const Fp* accum) {
   uint32_t mask = size - 1;
-  Fp x0(51);
-  Fp x1(1073725472);
-  Fp x2(1073725440);
-  Fp x3(32768);
-  Fp x4(8192);
-  Fp x5(2048);
-  Fp x6(512);
-  Fp x7(128);
-  Fp x8(32);
-  Fp x9(16);
-  Fp x10(4096);
-  Fp x11(1024);
-  Fp x12(256);
-  Fp x13(64);
-  Fp x14(61440);
-  Fp x15(2013265920);
-  Fp x16(65535);
-  Fp x17(49151);
-  Fp x18(16384);
-  Fp x19(48);
-  Fp x20(8);
-  Fp x21(9);
-  Fp x22(10);
-  Fp x23(11);
-  Fp x24(12);
-  Fp x25(2);
-  Fp x26(3);
-  Fp x27(4);
-  Fp x28(5);
-  Fp x29(6);
-  Fp x30(7);
-  Fp x31(1);
-  Fp x32(0);
+
+  // Use shared memory for constants to reduce per-thread register pressure
+  __shared__ Fp shared_constants[33];
+  if (threadIdx.x == 0) {
+    shared_constants[0] = Fp(51);         // x0
+    shared_constants[1] = Fp(1073725472); // x1
+    shared_constants[2] = Fp(1073725440); // x2
+    shared_constants[3] = Fp(32768);     // x3
+    shared_constants[4] = Fp(8192);      // x4
+    shared_constants[5] = Fp(2048);      // x5
+    shared_constants[6] = Fp(512);       // x6
+    shared_constants[7] = Fp(128);       // x7
+    shared_constants[8] = Fp(32);        // x8
+    shared_constants[9] = Fp(16);        // x9
+    shared_constants[10] = Fp(4096);     // x10
+    shared_constants[11] = Fp(1024);     // x11
+    shared_constants[12] = Fp(256);      // x12
+    shared_constants[13] = Fp(64);       // x13
+    shared_constants[14] = Fp(61440);    // x14
+    shared_constants[15] = Fp(2013265920); // x15
+    shared_constants[16] = Fp(65535);    // x16
+    shared_constants[17] = Fp(49151);    // x17
+    shared_constants[18] = Fp(16384);    // x18
+    shared_constants[19] = Fp(48);       // x19
+    shared_constants[20] = Fp(8);        // x20
+    shared_constants[21] = Fp(9);        // x21
+    shared_constants[22] = Fp(10);       // x22
+    shared_constants[23] = Fp(11);       // x23
+    shared_constants[24] = Fp(12);       // x24
+    shared_constants[25] = Fp(2);        // x25
+    shared_constants[26] = Fp(3);        // x26
+    shared_constants[27] = Fp(4);        // x27
+    shared_constants[28] = Fp(5);        // x28
+    shared_constants[29] = Fp(6);        // x29
+    shared_constants[30] = Fp(7);        // x30
+    shared_constants[31] = Fp(1);        // x31
+    shared_constants[32] = Fp(0);        // x32
+  }
+  __syncthreads();
+
+  // All threads read from shared memory (saves ~33 registers per thread)
+  const Fp& x0 = shared_constants[0];
+  const Fp& x1 = shared_constants[1];
+  const Fp& x2 = shared_constants[2];
+  const Fp& x3 = shared_constants[3];
+  const Fp& x4 = shared_constants[4];
+  const Fp& x5 = shared_constants[5];
+  const Fp& x6 = shared_constants[6];
+  const Fp& x7 = shared_constants[7];
+  const Fp& x8 = shared_constants[8];
+  const Fp& x9 = shared_constants[9];
+  const Fp& x10 = shared_constants[10];
+  const Fp& x11 = shared_constants[11];
+  const Fp& x12 = shared_constants[12];
+  const Fp& x13 = shared_constants[13];
+  const Fp& x14 = shared_constants[14];
+  const Fp& x15 = shared_constants[15];
+  const Fp& x16 = shared_constants[16];
+  const Fp& x17 = shared_constants[17];
+  const Fp& x18 = shared_constants[18];
+  const Fp& x19 = shared_constants[19];
+  const Fp& x20 = shared_constants[20];
+  const Fp& x21 = shared_constants[21];
+  const Fp& x22 = shared_constants[22];
+  const Fp& x23 = shared_constants[23];
+  const Fp& x24 = shared_constants[24];
+  const Fp& x25 = shared_constants[25];
+  const Fp& x26 = shared_constants[26];
+  const Fp& x27 = shared_constants[27];
+  const Fp& x28 = shared_constants[28];
+  const Fp& x29 = shared_constants[29];
+  const Fp& x30 = shared_constants[30];
+  const Fp& x31 = shared_constants[31];
+  const Fp& x32 = shared_constants[32];
   Fp x33[1007];
 
   FpExt x34[144];
