@@ -27,36 +27,38 @@ __device__ FpExt rv32im_v2_19(uint32_t idx,
   uint32_t mask = size - 1;
   // Precompute common index expressions for better register usage
   uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;
-  const Fp x0(115);
-  const Fp x1(23);
-  const Fp x2(55);
-  const Fp x3(103);
-  const Fp x4(111);
-  const Fp x5(5);
-  const Fp x6(65520);
-  const Fp x7(99);
-  const Fp x8(0);
-  const Fp x9(2013265920);
-  const Fp x10(16384);
-  const Fp x11(8192);
-  const Fp x12(4096);
-  const Fp x13(2048);
-  const Fp x14(1024);
-  const Fp x15(512);
-  const Fp x16(256);
-  const Fp x17(128);
-  const Fp x18(64);
-  const Fp x19(32);
-  const Fp x20(16);
-  const Fp x21(8);
-  const Fp x22(4);
-  const Fp x23(19);
-  const Fp x24(3);
-  const Fp x25(1006632961);
-  const Fp x26(32768);
-  const Fp x27(1);
-  const Fp x28(65535);
-  const Fp x29(65536);
+  // Load constants from __constant__ memory instead of per-thread construction
+  // This frees registers and enables better CSE by the compiler
+  const Fp& x0 = kPolyFpLut[0];   // 115
+  const Fp& x1 = kPolyFpLut[1];   // 23
+  const Fp& x2 = kPolyFpLut[2];   // 55
+  const Fp& x3 = kPolyFpLut[3];   // 103
+  const Fp& x4 = kPolyFpLut[4];   // 111
+  const Fp& x5 = kPolyFpLut[5];   // 5
+  const Fp& x6 = kPolyFpLut[6];   // 65520
+  const Fp& x7 = kPolyFpLut[7];   // 99
+  const Fp& x8 = kPolyFpLut[8];   // 0
+  const Fp& x9 = kPolyFpLut[9];   // 2013265920
+  const Fp& x10 = kPolyFpLut[10]; // 16384
+  const Fp& x11 = kPolyFpLut[11]; // 8192
+  const Fp& x12 = kPolyFpLut[12]; // 4096
+  const Fp& x13 = kPolyFpLut[13]; // 2048
+  const Fp& x14 = kPolyFpLut[14]; // 1024
+  const Fp& x15 = kPolyFpLut[15]; // 512
+  const Fp& x16 = kPolyFpLut[16]; // 256
+  const Fp& x17 = kPolyFpLut[17]; // 128
+  const Fp& x18 = kPolyFpLut[18]; // 64
+  const Fp& x19 = kPolyFpLut[19]; // 32
+  const Fp& x20 = kPolyFpLut[20]; // 16
+  const Fp& x21 = kPolyFpLut[21]; // 8
+  const Fp& x22 = kPolyFpLut[22]; // 4
+  const Fp& x23 = kPolyFpLut[23]; // 19
+  const Fp& x24 = kPolyFpLut[24]; // 3
+  const Fp& x25 = kPolyFpLut[25]; // 1006632961
+  const Fp& x26 = kPolyFpLut[26]; // 32768
+  const Fp& x27 = kPolyFpLut[27]; // 1
+  const Fp& x28 = kPolyFpLut[28]; // 65535
+  const Fp& x29 = kPolyFpLut[29]; // 65536
   const Fp x30(2);
   Fp x31 = arg8[29 * size + base_idx_0];
   Fp x32 = arg8[31 * size + base_idx_0];
@@ -6585,40 +6587,46 @@ __device__ FpExt poly_fp(uint32_t idx,
   // INV_RATE * 0 = 0, so this simplifies to idx & mask
   uint32_t base_idx_0 = (idx - INV_RATE * 0) & mask;  // = idx & mask
   uint32_t base_idx_1 = (idx - INV_RATE * 1) & mask;  // = (idx - 4) & mask
-  Fp x0(51);
-  Fp x1(1073725472);
-  Fp x2(1073725440);
-  Fp x3(32768);
-  Fp x4(8192);
-  Fp x5(2048);
-  Fp x6(512);
-  Fp x7(128);
-  Fp x8(32);
-  Fp x9(16);
-  Fp x10(4096);
-  Fp x11(1024);
-  Fp x12(256);
-  Fp x13(64);
-  Fp x14(61440);
-  Fp x15(2013265920);
-  Fp x16(65535);
-  Fp x17(49151);
-  Fp x18(16384);
-  Fp x19(48);
-  Fp x20(8);
-  Fp x21(9);
-  Fp x22(10);
-  Fp x23(11);
-  Fp x24(12);
-  Fp x25(2);
-  Fp x26(3);
-  Fp x27(4);
-  Fp x28(5);
-  Fp x29(6);
-  Fp x30(7);
-  Fp x31(1);
-  Fp x32(0);
-  // Large arrays on stack - compiler will optimize allocation
+  // Load constants from __constant__ memory instead of per-thread construction
+  // This frees registers and enables better CSE by the compiler
+  const Fp& x0 = kPolyFpLut[0];   // 51
+  const Fp& x1 = kPolyFpLut[1];   // 1073725472
+  const Fp& x2 = kPolyFpLut[2];   // 1073725440
+  const Fp& x3 = kPolyFpLut[3];   // 32768
+  const Fp& x4 = kPolyFpLut[4];   // 8192
+  const Fp& x5 = kPolyFpLut[5];   // 2048
+  const Fp& x6 = kPolyFpLut[6];   // 512
+  const Fp& x7 = kPolyFpLut[7];   // 128
+  const Fp& x8 = kPolyFpLut[8];   // 32
+  const Fp& x9 = kPolyFpLut[9];   // 16
+  const Fp& x10 = kPolyFpLut[10]; // 4096
+  const Fp& x11 = kPolyFpLut[11]; // 1024
+  const Fp& x12 = kPolyFpLut[12]; // 256
+  const Fp& x13 = kPolyFpLut[13]; // 64
+  const Fp& x14 = kPolyFpLut[14]; // 61440
+  const Fp& x15 = kPolyFpLut[15]; // 2013265920
+  const Fp& x16 = kPolyFpLut[16]; // 65535
+  const Fp& x17 = kPolyFpLut[17]; // 49151
+  const Fp& x18 = kPolyFpLut[18]; // 16384
+  const Fp& x19 = kPolyFpLut[19]; // 48
+  const Fp& x20 = kPolyFpLut[20]; // 8
+  const Fp& x21 = kPolyFpLut[21]; // 9
+  const Fp& x22 = kPolyFpLut[22]; // 10
+  const Fp& x23 = kPolyFpLut[23]; // 11
+  const Fp& x24 = kPolyFpLut[24]; // 12
+  const Fp& x25 = kPolyFpLut[25]; // 2
+  const Fp& x26 = kPolyFpLut[26]; // 3
+  const Fp& x27 = kPolyFpLut[27]; // 4
+  const Fp& x28 = kPolyFpLut[28]; // 5
+  const Fp& x29 = kPolyFpLut[29]; // 6
+  const Fp& x30 = kPolyFpLut[30]; // 7
+  const Fp& x31 = kPolyFpLut[31]; // 1
+  const Fp& x32 = kPolyFpLut[32]; // 0
+  // WARNING: Large stack arrays severely limit occupancy!
+  // Fp x33[1007] = ~8KB per thread, FpExt x34[144] = ~4.6KB per thread
+  // Total ~12.6KB per thread limits occupancy to 1-2 warps per SM
+  // TODO: Regenerate code to stream values instead of materializing all at once,
+  // or use shared memory tiles that are reused across the warp
   Fp x33[1007];
 
   FpExt x34[144];

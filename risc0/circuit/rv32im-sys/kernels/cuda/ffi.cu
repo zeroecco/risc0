@@ -446,12 +446,14 @@ const char* risc0_circuit_rv32im_cuda_witgen(uint32_t mode,
       {
         nvtx3::scoped_range range("phase1");
         par_stepExec<<<cfg1.grid, cfg1.block, 0, stream>>>(ctx.ctx, 0, split);
-        CUDA_OK(cudaStreamSynchronize(stream));
+        // Removed cudaStreamSynchronize() - phase2 can be queued immediately
+        // The scheduler will keep SMs busy as soon as phase1 tail finishes
       }
       {
         nvtx3::scoped_range range("phase2");
         par_stepExec<<<cfg2.grid, cfg2.block, 0, stream>>>(ctx.ctx, split, phase2Count);
-        CUDA_OK(cudaStreamSynchronize(stream));
+        // Removed cudaStreamSynchronize() - let caller decide when to wait
+        // This enables better device utilization
       }
     } break;
     case kStepModeSeqForward:

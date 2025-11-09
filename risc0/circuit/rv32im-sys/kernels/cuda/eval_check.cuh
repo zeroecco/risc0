@@ -302,4 +302,9 @@ constexpr size_t INV_RATE = 4;
 constexpr size_t kNumPolyMixPows = 458;
 extern __constant__ FpExt poly_mix[kNumPolyMixPows];
 
+// Precomputed Fp constants to avoid per-thread register allocation
+// These values are used frequently across all threads and never change
+constexpr size_t kNumFpConstants = 33;
+extern __constant__ Fp kPolyFpLut[kNumFpConstants];
+
 } // namespace risc0::circuit::rv32im_v2::cuda
