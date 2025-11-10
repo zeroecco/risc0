@@ -1281,6 +1281,8 @@ __device__ FpExt rv32im_v2_15(uint32_t idx,
                               const Fp* arg11,
                               const Fp* arg12) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0(1073725568);
   Fp x1(1073726464);
   Fp x2(115);
@@ -2602,6 +2604,8 @@ __device__ FpExt rv32im_v2_11(uint32_t idx,
                               const Fp* arg11,
                               const Fp* arg12) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0(1073741824);
   Fp x1(32);
   Fp x2(256);
@@ -3901,6 +3905,8 @@ __device__ FpExt rv32im_v2_7(uint32_t idx,
                              const Fp* arg10,
                              const Fp* arg11) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0(15);
   Fp x1(256);
   Fp x2(128);
@@ -5298,6 +5304,8 @@ __device__ FpExt rv32im_v2_3(uint32_t idx,
                              const Fp* arg8,
                              const Fp* arg9) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   FpExt x0{128, 0, 0, 0};
   FpExt x1{1, 0, 0, 0};
   FpExt x2{0, 0, 0, 0};
@@ -6591,6 +6599,8 @@ __device__ FpExt poly_fp(uint32_t idx,
                          const Fp* mix,
                          const Fp* accum) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
 
   // Use shared memory for constants to reduce per-thread register pressure
   // Use assignment operator (=) instead of constructors to avoid dynamic initialization warning

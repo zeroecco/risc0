@@ -1326,6 +1326,8 @@ __device__ FpExt rv32im_v2_12(uint32_t idx,
                               const Fp* arg11,
                               const Fp* arg12) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0(24);
   FpExt x1{0, 0, 0, 0};
   FpExt x2{1, 0, 0, 0};
@@ -2592,6 +2594,8 @@ __device__ FpExt rv32im_v2_8(uint32_t idx,
                              const Fp* arg10,
                              const Fp* arg11) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0(1810596765);
   Fp x1(1210751726);
   Fp x2(1327682690);
@@ -3625,6 +3629,8 @@ __device__ FpExt rv32im_v2_4(uint32_t idx,
                              const Fp* arg10,
                              const Fp* arg11) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0(41);
   Fp x1(1509949441);
   Fp x2(1073725447);
@@ -5046,6 +5052,8 @@ __device__ FpExt rv32im_v2_4(uint32_t idx,
 __device__ FpExt rv32im_v2_0(
     uint32_t idx, uint32_t size, FpExt* arg0, FpExt arg1, FpExt arg2, FpExt arg3, const Fp* arg4) {
   uint32_t mask = size - 1;
+  // OPTIMIZATION: Simplify base_idx_0 - INV_RATE * 0 = 0, so this is just idx & mask
+  uint32_t base_idx_0 = idx & mask;
   Fp x0 = arg4[67 * size + base_idx_0];
   Fp x1 = arg4[65 * size + base_idx_0];
   Fp x2 = arg4[69 * size + base_idx_0];
