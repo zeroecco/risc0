@@ -29,37 +29,38 @@ __device__ FpExt rv32im_v2_17(uint32_t idx,
 
   // Use shared memory for constants to reduce per-thread register pressure
   // Thread 0 loads constants once, all threads read from shared memory
+  // Use assignment operator (=) instead of constructors to avoid dynamic initialization warning
   __shared__ Fp shared_constants[29];
   if (threadIdx.x == 0) {
-    shared_constants[0] = Fp(19);         // x0
-    shared_constants[1] = Fp(65535);     // x1
-    shared_constants[2] = Fp(2013235201); // x2
-    shared_constants[3] = Fp(131070);    // x3
-    shared_constants[4] = Fp(131072);    // x4
-    shared_constants[5] = Fp(16777216);  // x5
-    shared_constants[6] = Fp(1006632961); // x6
-    shared_constants[7] = Fp(5);         // x7
-    shared_constants[8] = Fp(51);        // x8
-    shared_constants[9] = Fp(64);        // x9
-    shared_constants[10] = Fp(8);       // x10
-    shared_constants[11] = Fp(256);     // x11
-    shared_constants[12] = Fp(1024);    // x12
-    shared_constants[13] = Fp(4096);    // x13
-    shared_constants[14] = Fp(16384);   // x14
-    shared_constants[15] = Fp(16);      // x15
-    shared_constants[16] = Fp(32);      // x16
-    shared_constants[17] = Fp(128);     // x17
-    shared_constants[18] = Fp(512);      // x18
-    shared_constants[19] = Fp(2048);    // x19
-    shared_constants[20] = Fp(8192);   // x20
-    shared_constants[21] = Fp(32768);   // x21
-    shared_constants[22] = Fp(0);       // x22
-    shared_constants[23] = Fp(2013265920); // x23
-    shared_constants[24] = Fp(4);       // x24
-    shared_constants[25] = Fp(3);       // x25
-    shared_constants[26] = Fp(2);       // x26
-    shared_constants[27] = Fp(65536);   // x27
-    shared_constants[28] = Fp(1);       // x28
+    shared_constants[0] = 19;         // x0
+    shared_constants[1] = 65535;     // x1
+    shared_constants[2] = 2013235201; // x2
+    shared_constants[3] = 131070;    // x3
+    shared_constants[4] = 131072;    // x4
+    shared_constants[5] = 16777216;  // x5
+    shared_constants[6] = 1006632961; // x6
+    shared_constants[7] = 5;         // x7
+    shared_constants[8] = 51;        // x8
+    shared_constants[9] = 64;        // x9
+    shared_constants[10] = 8;       // x10
+    shared_constants[11] = 256;     // x11
+    shared_constants[12] = 1024;    // x12
+    shared_constants[13] = 4096;    // x13
+    shared_constants[14] = 16384;   // x14
+    shared_constants[15] = 16;      // x15
+    shared_constants[16] = 32;      // x16
+    shared_constants[17] = 128;     // x17
+    shared_constants[18] = 512;      // x18
+    shared_constants[19] = 2048;    // x19
+    shared_constants[20] = 8192;   // x20
+    shared_constants[21] = 32768;   // x21
+    shared_constants[22] = 0;       // x22
+    shared_constants[23] = 2013265920; // x23
+    shared_constants[24] = 4;       // x24
+    shared_constants[25] = 3;       // x25
+    shared_constants[26] = 2;       // x26
+    shared_constants[27] = 65536;   // x27
+    shared_constants[28] = 1;       // x28
   }
   __syncthreads();
 

@@ -51,8 +51,9 @@ __device__ __forceinline__ Fp fp_pow_two_pow(Fp base, uint32_t po2) {
 
 } // namespace
 
-// Tight __launch_bounds__ to minimize register pressure - critical for high-register kernels
-__global__ __launch_bounds__(256, 2) void eval_check(Fp* __restrict__ check,
+// Relaxed __launch_bounds__ to allow rv32im_v2_19's 255 registers
+// rv32im_v2_19 requires 255 registers, so we must allow at least that many
+__global__ __launch_bounds__(256, 1) void eval_check(Fp* __restrict__ check,
                                                      const Fp* __restrict__ ctrl,
                                                      const Fp* __restrict__ data,
                                                      const Fp* __restrict__ accum,
