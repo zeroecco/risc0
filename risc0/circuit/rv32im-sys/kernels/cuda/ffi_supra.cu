@@ -57,7 +57,8 @@ __device__ __forceinline__ Fp fp_pow_two_pow(Fp base, uint32_t po2) {
 
 // Phase 1: Compute poly_fp results and store in intermediate buffer
 // This phase can run with better occupancy by processing fewer cycles per thread
-__global__ __launch_bounds__(256, 2) void eval_check_phase1(FpExt* __restrict__ poly_results,
+// Relaxed __launch_bounds__ to allow rv32im_v2_19's 255 registers
+__global__ __launch_bounds__(256, 1) void eval_check_phase1(FpExt* __restrict__ poly_results,
                                                              const Fp* __restrict__ ctrl,
                                                              const Fp* __restrict__ data,
                                                              const Fp* __restrict__ accum,
