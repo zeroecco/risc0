@@ -73,16 +73,23 @@ __global__ __launch_bounds__(256, 1) void eval_check(Fp* __restrict__ check,
   Fp rou_pow = fp_pow_u32(rou, thread_idx);
   const Fp rou_stride = fp_pow_u32(rou, stride);
 
+  // OPTIMIZATION: Precompute y_stride to avoid expensive fp_pow_two_pow in loop
+  // y = (three * rou_pow)^(2^po2), and rou_pow increments by rou_stride each iteration
+  // So: y_next = (three * rou_pow * rou_stride)^(2^po2) = y * (three * rou_stride)^(2^po2)
+  // Compute y_stride once, then multiply y by y_stride each iteration
+  const Fp y_stride = fp_pow_two_pow(three * rou_stride, po2);
+  Fp base = three * rou_pow;
+  Fp y = fp_pow_two_pow(base, po2);  // Compute initial y once
+
   for (uint32_t cycle = thread_idx; cycle < domain; cycle += stride) {
     FpExt tot = poly_fp(cycle, domain, ctrl, out, data, mix, accum);
-    Fp base = three * rou_pow;
-    Fp y = fp_pow_two_pow(base, po2);
     FpExt ret = tot * inv(y - one);
     check[domain * 0 + cycle] = ret[0];
     check[domain * 1 + cycle] = ret[1];
     check[domain * 2 + cycle] = ret[2];
     check[domain * 3 + cycle] = ret[3];
-    rou_pow *= rou_stride;
+    // Increment y for next iteration (much faster than recomputing fp_pow_two_pow)
+    y *= y_stride;
   }
 }
 
