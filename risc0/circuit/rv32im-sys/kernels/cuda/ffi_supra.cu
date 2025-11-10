@@ -23,27 +23,65 @@ namespace risc0::circuit::rv32im_v2::cuda {
 
 __constant__ FpExt poly_mix[kNumPolyMixPows];
 
-// __launch_bounds__(256, 2) forces max 256 threads/block and min 2 blocks/SM
-// This limits register usage to ~64 registers per thread, improving occupancy
-__global__ __launch_bounds__(256, 2) void eval_check(Fp* check,
-                                                      const Fp* ctrl,
-                                                      const Fp* data,
-                                                      const Fp* accum,
-                                                      const Fp* mix,
-                                                      const Fp* out,
-                                                      const Fp rou,
-                                                      uint32_t po2,
-                                                      uint32_t domain) {
-  uint32_t cycle = blockDim.x * blockIdx.x + threadIdx.x;
-  if (cycle < domain) {
+namespace {
+
+__device__ __forceinline__ Fp fp_pow_u32(Fp base, uint32_t exp) {
+  Fp acc(1);
+  Fp cur = base;
+  uint32_t e = exp;
+  while (e) {
+    if (e & 1) {
+      acc *= cur;
+    }
+    e >>= 1;
+    if (e) {
+      cur *= cur;
+    }
+  }
+  return acc;
+}
+
+__device__ __forceinline__ Fp fp_pow_two_pow(Fp base, uint32_t po2) {
+  Fp acc = base;
+  for (uint32_t i = 0; i < po2; ++i) {
+    acc *= acc;
+  }
+  return acc;
+}
+
+} // namespace
+
+// Tight __launch_bounds__ to minimize register pressure - critical for high-register kernels
+__global__ __launch_bounds__(256, 2) void eval_check(Fp* __restrict__ check,
+                                                     const Fp* __restrict__ ctrl,
+                                                     const Fp* __restrict__ data,
+                                                     const Fp* __restrict__ accum,
+                                                     const Fp* __restrict__ mix,
+                                                     const Fp* __restrict__ out,
+                                                     const Fp rou,
+                                                     uint32_t po2,
+                                                     uint32_t domain) {
+  const uint32_t thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
+  const uint32_t stride = blockDim.x * gridDim.x;
+  if (thread_idx >= domain) {
+    return;
+  }
+
+  const Fp three(3);
+  const Fp one(1);
+  Fp rou_pow = fp_pow_u32(rou, thread_idx);
+  const Fp rou_stride = fp_pow_u32(rou, stride);
+
+  for (uint32_t cycle = thread_idx; cycle < domain; cycle += stride) {
     FpExt tot = poly_fp(cycle, domain, ctrl, out, data, mix, accum);
-    Fp x = pow(rou, cycle);
-    Fp y = pow(Fp(3) * x, 1 << po2);
-    FpExt ret = tot * inv(y - Fp(1));
+    Fp base = three * rou_pow;
+    Fp y = fp_pow_two_pow(base, po2);
+    FpExt ret = tot * inv(y - one);
     check[domain * 0 + cycle] = ret[0];
     check[domain * 1 + cycle] = ret[1];
     check[domain * 2 + cycle] = ret[2];
     check[domain * 3 + cycle] = ret[3];
+    rou_pow *= rou_stride;
   }
 }
 
@@ -64,11 +102,9 @@ const char* risc0_circuit_rv32im_cuda_eval_check(Fp* check,
                                                  uint32_t domain,
                                                  const FpExt* poly_mix_pows) {
   try {
-    CUDA_OK(cudaDeviceSynchronize());
-
     CudaStream stream;
     auto cfg = getSimpleConfig(domain);
-    cudaMemcpyToSymbol(poly_mix, poly_mix_pows, sizeof(poly_mix));
+    CUDA_OK(cudaMemcpyToSymbol(poly_mix, poly_mix_pows, sizeof(poly_mix)));
     eval_check<<<cfg.grid, cfg.block, 0, stream>>>(
         check, ctrl, data, accum, mix, out, rou, po2, domain);
     CUDA_OK(cudaStreamSynchronize(stream));

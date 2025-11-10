@@ -62,6 +62,22 @@ struct LaunchConfig {
   LaunchConfig(int grid, int block, size_t shared = 0) : grid(grid), block(block), shared(shared) {}
 };
 
+// Occupancy-aware launch configuration
+// Uses cudaOccupancyMaxPotentialBlockSize to adapt to kernel's register/shared usage
+// Works correctly with __launch_bounds__ annotations (e.g., __launch_bounds__(256, 2))
+template <typename KernelFunc>
+inline LaunchConfig getOccupancyConfig(KernelFunc kernel, uint32_t count, size_t sharedMem = 0) {
+  int minGridSize, blockSize;
+  // Query optimal block size based on kernel's resource usage
+  // This respects __launch_bounds__ annotations on the kernel
+  CUDA_OK(cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, kernel, sharedMem, 0));
+
+  int grid = (count + blockSize - 1) / blockSize;
+  return LaunchConfig{grid, blockSize, sharedMem};
+}
+
+// Fallback simple config - adaptive block size based on device properties
+// For GB10 (Blackwell) and other modern GPUs, uses device-specific heuristics
 inline LaunchConfig getSimpleConfig(uint32_t count) {
   int device;
   CUDA_OK(cudaGetDevice(&device));
@@ -69,7 +85,30 @@ inline LaunchConfig getSimpleConfig(uint32_t count) {
   int maxThreads;
   CUDA_OK(cudaDeviceGetAttribute(&maxThreads, cudaDevAttrMaxThreadsPerBlock, device));
 
-  int block = maxThreads / 4;
+  int computeCapabilityMajor, computeCapabilityMinor;
+  CUDA_OK(cudaDeviceGetAttribute(&computeCapabilityMajor, cudaDevAttrComputeCapabilityMajor, device));
+  CUDA_OK(cudaDeviceGetAttribute(&computeCapabilityMinor, cudaDevAttrComputeCapabilityMinor, device));
+
+  // For GB10 (Blackwell, compute capability 10.x) and other modern architectures:
+  // Use 256 threads per block as default, which works well with __launch_bounds__(256, 2)
+  // This balances occupancy with register pressure for high-register kernels
+  int block;
+  if (computeCapabilityMajor >= 10) {
+    // GB10 and newer: 256 threads works well with typical __launch_bounds__ constraints
+    block = 256;
+  } else if (computeCapabilityMajor >= 8) {
+    // Ampere/Ada: Use 256 as well for consistency
+    block = 256;
+  } else {
+    // Older architectures: Use maxThreads/4 as fallback
+    block = maxThreads / 4;
+  }
+
+  // Ensure block size doesn't exceed device maximum
+  if (block > maxThreads) {
+    block = maxThreads;
+  }
+
   int grid = (count + block - 1) / block;
   return LaunchConfig{grid, block, 0};
 }

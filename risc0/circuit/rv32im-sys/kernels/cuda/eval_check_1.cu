@@ -9,7 +9,7 @@
 
 namespace risc0::circuit::rv32im_v2::cuda {
 
-__device__ __launch_bounds__(256) FpExt rv32im_v2_18(uint32_t idx,
+__device__ FpExt rv32im_v2_18(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -261,7 +261,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_18(uint32_t idx,
   Fp x199 = x198 * x30;
   Fp x200 = arg0[112];
   Fp x201 = x200 * x31;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x206 = arg0[113];
   Fp x208 = arg0[114];
   Fp x210 = arg0[115];
@@ -285,7 +285,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_18(uint32_t idx,
   Fp x228 = x227 * x30;
   Fp x229 = arg0[118];
   Fp x230 = x229 * x31;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x235 = arg0[119];
   Fp x237 = arg0[120];
   Fp x239 = arg0[121];
@@ -337,7 +337,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_18(uint32_t idx,
   Fp x285 = x26 - x282;
   Fp x286 = x285 * x25;
   Fp x287 = arg0[79];
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x290 = (x287 + x286 + x284) - x34;
   FpExt x291 = x279 + poly_mix[169] * x290;
   Fp x292 = arg0[141];
@@ -1271,7 +1271,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_18(uint32_t idx,
 
   return x1171;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_14(uint32_t idx,
+__device__ FpExt rv32im_v2_14(uint32_t idx,
                               uint32_t size,
                               FpExt arg0,
                               FpExt arg1,
@@ -2556,7 +2556,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_14(uint32_t idx,
 
   return x1239;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_10(uint32_t idx,
+__device__ FpExt rv32im_v2_10(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -3991,7 +3991,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_10(uint32_t idx,
 
   return x1371;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_6(uint32_t idx,
+__device__ FpExt rv32im_v2_6(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -5210,7 +5210,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_6(uint32_t idx,
 
   return x1156;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_2(uint32_t idx,
+__device__ FpExt rv32im_v2_2(uint32_t idx,
                              uint32_t size,
                              FpExt* arg0,
                              FpExt arg1,

@@ -9,7 +9,7 @@
 
 namespace risc0::circuit::rv32im_v2::cuda {
 
-__device__ __launch_bounds__(256) FpExt rv32im_v2_17(uint32_t idx,
+__device__ FpExt rv32im_v2_17(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -433,7 +433,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_17(uint32_t idx,
   FpExt x340 = x337 + poly_mix[37] * x339;
   Fp x341 = x50 * x21;
   Fp x342 = x51 * x20;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x344 = x52 * x19;
   Fp x346 = x53 * x18;
   Fp x348 = x54 * x17;
@@ -445,7 +445,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_17(uint32_t idx,
   FpExt x358 = x340 + poly_mix[38] * x357;
   Fp x359 = x59 * x21;
   Fp x360 = x60 * x14;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x362 = x61 * x13;
   Fp x364 = x62 * x12;
   Fp x366 = x63 * x11;
@@ -1314,7 +1314,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_17(uint32_t idx,
 
   return x1144;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_13(uint32_t idx,
+__device__ FpExt rv32im_v2_13(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -2648,7 +2648,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_13(uint32_t idx,
 
   return x1218;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_9(uint32_t idx,
+__device__ FpExt rv32im_v2_9(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -3007,7 +3007,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_9(uint32_t idx,
   Fp x340 = x339 + x101;
   Fp x341 = x340 + x102;
   Fp x342 = x341 + x103;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x352 = x342 + x104 + x105 + x106 + x107 + x108 + x109 + x110 + x111 + x112 + x113;
   Fp x353 = x90 * x32;
   Fp x354 = x352 + x353;
@@ -3727,7 +3727,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_9(uint32_t idx,
 
   return x1042;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_5(uint32_t idx,
+__device__ FpExt rv32im_v2_5(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -5076,7 +5076,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_5(uint32_t idx,
 
   return x1255;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_1(uint32_t idx,
+__device__ FpExt rv32im_v2_1(uint32_t idx,
                              uint32_t size,
                              FpExt* arg0,
                              FpExt arg1,

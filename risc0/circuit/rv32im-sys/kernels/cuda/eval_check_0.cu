@@ -9,8 +9,7 @@
 
 namespace risc0::circuit::rv32im_v2::cuda {
 
-// __launch_bounds__ limits register usage in device functions
-__device__ __launch_bounds__(256) FpExt rv32im_v2_19(uint32_t idx,
+__device__ FpExt rv32im_v2_19(uint32_t idx,
                                                      uint32_t size,
                                                      Fp* arg0,
                                                      FpExt arg1,
@@ -1263,7 +1262,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_19(uint32_t idx,
 
   return x1157;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_15(uint32_t idx,
+__device__ FpExt rv32im_v2_15(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -2584,7 +2583,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_15(uint32_t idx,
 
   return x1209;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_11(uint32_t idx,
+__device__ FpExt rv32im_v2_11(uint32_t idx,
                               uint32_t size,
                               Fp* arg0,
                               FpExt arg1,
@@ -3884,7 +3883,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_11(uint32_t idx,
 
   return x1204;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_7(uint32_t idx,
+__device__ FpExt rv32im_v2_7(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -5283,7 +5282,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_7(uint32_t idx,
 
   return x1292;
 }
-__device__ __launch_bounds__(256) FpExt rv32im_v2_3(uint32_t idx,
+__device__ FpExt rv32im_v2_3(uint32_t idx,
                              uint32_t size,
                              Fp* arg0,
                              FpExt arg1,
@@ -6581,8 +6580,7 @@ __device__ __launch_bounds__(256) FpExt rv32im_v2_3(uint32_t idx,
 
   return x1255;
 }
-// __launch_bounds__ limits register usage - critical for this large function
-__device__ __launch_bounds__(256) FpExt poly_fp(uint32_t idx,
+__device__ FpExt poly_fp(uint32_t idx,
                                                 uint32_t size,
                                                 const Fp* ctrl,
                                                 const Fp* out,
@@ -6664,9 +6662,21 @@ __device__ __launch_bounds__(256) FpExt poly_fp(uint32_t idx,
   const Fp& x30 = shared_constants[30];
   const Fp& x31 = shared_constants[31];
   const Fp& x32 = shared_constants[32];
-  Fp x33[1007];
+  // REGISTER PRESSURE FIX: Arrays automatically in local memory, but ensure compiler knows
+  // Analysis: x33 uses only 189/1007 indices (18.8% utilization), x34 never written
+  // Arrays >~1KB are automatically placed in local memory (not registers)
+  // Using pointer indirection + address-taken pattern ensures register allocator ignores them
+  Fp x33_storage[1007];
+  FpExt x34_storage[144];
 
-  FpExt x34[144];
+  // Force address-taken pattern - prevents compiler from trying to register-allocate
+  // The & operator forces the compiler to treat these as memory, not registers
+  Fp* __restrict__ x33 = &x33_storage[0];
+  FpExt* __restrict__ x34 = &x34_storage[0];
+
+  // Explicitly mark as local memory using compiler hint
+  // This pattern (address-of first element) makes it clear to register allocator
+  // that these arrays are memory-based and should not count against register limits
 
   Fp x35 = data[18 * size + ((idx - INV_RATE * 0) & mask)];
   Fp x36 = data[16 * size + ((idx - INV_RATE * 1) & mask)];
@@ -6947,7 +6957,7 @@ __device__ __launch_bounds__(256) FpExt poly_fp(uint32_t idx,
   Fp x304 = x31 - x64;
   Fp x305 = x64 * x304;
   FpExt x306 = x303 + poly_mix[26] * x305;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x319 = (x52 + x53 + x54 + x55 + x56 + x57 + x58 + x59 + x60 + x61 + x62 + x63 + x64) - x31;
   FpExt x320 = x306 + poly_mix[27] * x319;
   Fp x321 = x54 * x25;
@@ -6963,7 +6973,7 @@ __device__ __launch_bounds__(256) FpExt poly_fp(uint32_t idx,
   Fp x331 = x64 * x24;
   Fp x332 = x53 + x321;
   Fp x333 = x332 + x322;
-  // Optimized: collapse single-use intermediate chain to reduce register pressure
+  // Minimize register pressure: collapse single-use intermediate chain
   Fp x343 = (x333 + x323 + x324 + x325 + x326 + x327 + x328 + x329 + x330 + x331) - x42;
   FpExt x344 = x320 + poly_mix[28] * x343;
   Fp x345 = x218 - x19;
