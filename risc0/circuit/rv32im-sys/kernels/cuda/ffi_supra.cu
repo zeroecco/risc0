@@ -58,7 +58,9 @@ __device__ __forceinline__ Fp fp_pow_two_pow(Fp base, uint32_t po2) {
 // Phase 1: Compute poly_fp results and store in intermediate buffer
 // This phase can run with better occupancy by processing fewer cycles per thread
 // Relaxed __launch_bounds__ to allow rv32im_v2_19's 255 registers
-__global__ __launch_bounds__(256, 1) void eval_check_phase1(FpExt* __restrict__ poly_results,
+// Using 128 threads per block allows 2 blocks/SM (33% occupancy) vs 1 block/SM (16.7%)
+// (128, 1) means max 128 threads, min 1 block/SM - allows compiler to fit 2 blocks if possible
+__global__ __launch_bounds__(128, 1) void eval_check_phase1(FpExt* __restrict__ poly_results,
                                                              const Fp* __restrict__ ctrl,
                                                              const Fp* __restrict__ data,
                                                              const Fp* __restrict__ accum,
@@ -186,8 +188,12 @@ const char* risc0_circuit_rv32im_cuda_eval_check(Fp* check,
 
     // Phase 1: Compute poly_fp for all cycles
     // Process 1 cycle per thread to avoid keeping y values in registers
-    auto cfg1 = getSimpleConfig(domain);
-    eval_check_phase1<<<cfg1.grid, cfg1.block, 0, stream>>>(
+    // Use smaller block size (128 threads) to improve occupancy:
+    // - 255 regs * 128 threads = 32,640 regs/block → 2 blocks/SM (33% occupancy)
+    // - vs 255 regs * 256 threads = 65,280 regs/block → 1 block/SM (16.7% occupancy)
+    int block_size_phase1 = 128;  // Smaller blocks for better occupancy with high register pressure
+    int grid_size_phase1 = (domain + block_size_phase1 - 1) / block_size_phase1;
+    eval_check_phase1<<<grid_size_phase1, block_size_phase1, 0, stream>>>(
         d_poly_results, ctrl, data, accum, mix, out, domain);
 
     // Phase 2: Finalize computation with low register pressure
