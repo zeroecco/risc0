@@ -290,6 +290,10 @@ extern __device__ FpExt rv32im_v2_1(uint32_t idx,
                                     const Fp* arg5);
 extern __device__ FpExt rv32im_v2_0(
     uint32_t idx, uint32_t size, FpExt* arg0, FpExt arg1, FpExt arg2, FpExt arg3, const Fp* arg4);
+// REGISTER OPTIMIZATION: Limit register usage to reduce spilling in poly_fp
+// The implementation in eval_check_*.cu files should use __attribute__((maxrregcount(128)))
+// or compiler will be forced to use local memory for intermediate values
+#pragma nv_diag_suppress 177  // Suppress register limit warnings
 extern __device__ FpExt poly_fp(uint32_t idx,
                                 uint32_t size,
                                 const Fp* ctrl,

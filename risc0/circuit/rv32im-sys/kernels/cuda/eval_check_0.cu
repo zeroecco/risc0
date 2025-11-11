@@ -6591,6 +6591,10 @@ __device__ FpExt rv32im_v2_3(uint32_t idx,
 
   return x1255;
 }
+// REGISTER OPTIMIZATION: Limit register usage to reduce spilling
+// Force compiler to use local memory for intermediate values instead of registers
+// Register limit is controlled via -Xptxas=-maxrregcount=128 compiler flag in build.rs
+#pragma nv_diag_suppress 177  // Suppress register limit warnings
 __device__ FpExt poly_fp(uint32_t idx,
                          uint32_t size,
                          const Fp* ctrl,
