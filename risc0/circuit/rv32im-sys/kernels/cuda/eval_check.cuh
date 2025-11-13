@@ -302,4 +302,22 @@ constexpr size_t INV_RATE = 4;
 constexpr size_t kNumPolyMixPows = 458;
 extern __constant__ FpExt poly_mix[kNumPolyMixPows];
 
-} // namespace risc0::circuit::rv32im_v2::cuda
+namespace detail {
+
+// Streams a contiguous slice of witnesses through poly_mix without pinning
+// each value in a long-lived register.
+__device__ inline FpExt apply_poly_mix_segment(FpExt acc,
+                                               const Fp* values,
+                                               uint32_t value_offset,
+                                               uint32_t len,
+                                               uint32_t mix_offset) {
+#pragma unroll 1
+  for (uint32_t i = 0; i < len; ++i) {
+    acc = acc + poly_mix[mix_offset + i] * values[value_offset + i];
+  }
+  return acc;
+}
+
+}  // namespace detail
+
+}  // namespace risc0::circuit::rv32im_v2::cuda

@@ -63,11 +63,13 @@ struct HostExecContext {
   HostExecContext(ExecBuffers* buffers, PreflightTrace* preflight, size_t cycles) {
     CUDA_OK(cudaMallocManaged(&ctx, sizeof(DeviceExecContext)));
 
-    CUDA_OK(cudaMalloc(&ctx->data, sizeof(Buffer)));
-    CUDA_OK(cudaMemcpy(ctx->data, &buffers->data, sizeof(Buffer), cudaMemcpyHostToDevice));
-
-    CUDA_OK(cudaMalloc(&ctx->global, sizeof(Buffer)));
-    CUDA_OK(cudaMemcpy(ctx->global, &buffers->global, sizeof(Buffer), cudaMemcpyHostToDevice));
+    // Allocate a contiguous block for both data and global buffers
+    Buffer* deviceBuffers;
+    CUDA_OK(cudaMalloc(&deviceBuffers, 2 * sizeof(Buffer)));
+    CUDA_OK(cudaMemcpy(deviceBuffers, &buffers->data, sizeof(Buffer), cudaMemcpyHostToDevice));
+    CUDA_OK(cudaMemcpy(deviceBuffers + 1, &buffers->global, sizeof(Buffer), cudaMemcpyHostToDevice));
+    ctx->data = deviceBuffers;
+    ctx->global = deviceBuffers + 1;
 
     CUDA_OK(cudaMalloc(&d_preflight.cycles, cycles * sizeof(PreflightCycle)));
     CUDA_OK(cudaMemcpy(d_preflight.cycles,
@@ -141,7 +143,7 @@ struct HostAccumContext {
   LookupTables d_tables;
 
   HostAccumContext(AccumBuffers* buffers, PreflightTrace* preflight, size_t cycles) {
-    CUDA_OK(cudaMallocManaged(&ctx, sizeof(DeviceAccumContext)));
+    CUDA_OK(cudaMalloc(&ctx, sizeof(DeviceAccumContext)));
 
     CUDA_OK(cudaMalloc(&ctx->data, sizeof(Buffer)));
     CUDA_OK(cudaMemcpy(ctx->data, &buffers->data, sizeof(Buffer), cudaMemcpyHostToDevice));
