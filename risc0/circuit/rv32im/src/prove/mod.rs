@@ -37,6 +37,18 @@ pub trait SegmentProver {
         self.prove_core(results)
     }
 
+    fn prewarm_segment(&self, segment: &Segment) -> Result<()> {
+        scope!("prewarm_segment");
+        let _ = self.prove(segment)?;
+        Ok(())
+    }
+
+    fn prewarm_po2(&self, po2: usize) -> Result<()> {
+        scope!("prewarm_po2");
+        let segment = self::hal::make_warmup_segment(po2)?;
+        self.prewarm_segment(&segment)
+    }
+
     fn preflight(&self, segment: &Segment) -> Result<PreflightResults>;
 
     fn prove_core(&self, preflight_results: PreflightResults) -> Result<Seal>;

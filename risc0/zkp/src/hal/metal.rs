@@ -874,6 +874,23 @@ impl<MH: MetalHash> Hal for MetalHal<MH> {
             }
         });
     }
+
+    fn eltwise_fill_elem_ramp(
+        &self,
+        into: &Self::Buffer<Self::Elem>,
+        count: usize,
+        start: u32,
+        step: u32,
+        into_offset: usize,
+        into_stride: usize,
+    ) {
+        into.view_mut(|into| {
+            for row in 0..count {
+                into[into_offset + row * into_stride] =
+                    Self::Elem::from_u64(start as u64 + row as u64 * step as u64);
+            }
+        });
+    }
 }
 
 fn simple_launch_params(count: u32, threads_per_group: u32) -> (MTLSize, MTLSize) {

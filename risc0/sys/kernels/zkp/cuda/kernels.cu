@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fp.h"
-#include "fpext.h"
+#include "kernels.h"
 
 constexpr size_t kFriFold = 16;
 
@@ -97,6 +96,14 @@ __global__ void gather_sample(
   uint gid = blockIdx.x * blockDim.x + threadIdx.x;
   if (gid < size) {
     dst[gid] = src[gid * stride + idx];
+  }
+}
+
+__global__ void
+gather_digest(DigestVal* dst, const DigestVal* src, const uint32_t* idxs, const uint32_t count) {
+  uint gid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (gid < count) {
+    dst[gid] = src[idxs[gid]];
   }
 }
 

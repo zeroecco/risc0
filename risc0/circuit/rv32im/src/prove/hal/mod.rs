@@ -16,9 +16,10 @@ pub(crate) mod cpu;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Result;
+use risc0_binfmt::MemoryImage;
 use risc0_core::scope;
 use risc0_zkp::{
     adapter::{CircuitInfo as _, PROOF_SYSTEM_INFO},
@@ -32,7 +33,7 @@ use super::{
     Seal, SegmentProver,
 };
 use crate::{
-    execute::segment::Segment,
+    execute::{platform::RESERVED_CYCLES, segment::Segment, testutil},
     zirgen::{
         circuit::{
             CircuitField, ExtVal, Val, REGCOUNT_MIX, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE,
@@ -41,7 +42,7 @@ use crate::{
         taps::TAPSET,
         CircuitImpl,
     },
-    RV32IM_SEAL_VERSION,
+    MAX_INSN_CYCLES, RV32IM_SEAL_VERSION,
 };
 
 pub(crate) struct MetaBuffer<H: Hal> {
@@ -107,6 +108,7 @@ where
     F: Fn() -> (Rc<H>, Rc<C>),
 {
     hal_factory: F,
+    runtime: RefCell<Option<(Rc<H>, Rc<C>)>>,
 }
 
 impl<H, C, F> SegmentProverImpl<H, C, F>
@@ -116,7 +118,21 @@ where
     F: Fn() -> (Rc<H>, Rc<C>),
 {
     pub fn new(hal_factory: F) -> Self {
-        Self { hal_factory }
+        Self {
+            hal_factory,
+            runtime: RefCell::new(None),
+        }
+    }
+
+    fn get_runtime(&self) -> (Rc<H>, Rc<C>) {
+        if self.runtime.borrow().is_none() {
+            let runtime = (self.hal_factory)();
+            *self.runtime.borrow_mut() = Some(runtime);
+        }
+
+        let runtime = self.runtime.borrow();
+        let (hal, circuit_hal) = runtime.as_ref().unwrap();
+        (hal.clone(), circuit_hal.clone())
     }
 }
 
@@ -155,7 +171,7 @@ where
             }
         }
 
-        let (hal, circuit_hal) = (self.hal_factory)();
+        let (hal, circuit_hal) = self.get_runtime();
 
         let po2 = preflight_results.po2();
         let witgen =
@@ -222,4 +238,33 @@ where
             prover.finalize(&[&mix.buf, global], circuit_hal.as_ref())
         }))
     }
+}
+
+const PAGING_CYCLES: usize = 1821;
+const BEFORE_LOOP_CYCLES: usize = 8;
+const NON_LOOP_CYCLES: usize =
+    RESERVED_CYCLES + PAGING_CYCLES + BEFORE_LOOP_CYCLES + MAX_INSN_CYCLES;
+
+pub(crate) fn make_warmup_segment(po2: usize) -> Result<Segment> {
+    let segment_cycles = 1 << po2;
+    assert!(segment_cycles > NON_LOOP_CYCLES);
+    let iterations = (segment_cycles - NON_LOOP_CYCLES) / 2;
+
+    let program = testutil::kernel::simple_loop(iterations as u32);
+    let image = MemoryImage::new_kernel(program);
+    let result = testutil::execute(
+        image,
+        po2,
+        MAX_INSN_CYCLES,
+        testutil::DEFAULT_SESSION_LIMIT,
+        &testutil::NullSyscall,
+        None,
+    )?;
+    let segment = result
+        .segments
+        .into_iter()
+        .next()
+        .expect("warmup execution produced no segment");
+    assert_eq!(segment.po2 as usize, po2);
+    Ok(segment)
 }

@@ -52,8 +52,8 @@ pub struct CudaCircuitHal<CH: CudaHash> {
 }
 
 impl<CH: CudaHash> CudaCircuitHal<CH> {
-    pub fn new(_hal: Rc<CudaHal<CH>>) -> Self {
-        Self { _hal }
+    pub fn new(hal: Rc<CudaHal<CH>>) -> Self {
+        Self { _hal: hal }
     }
 }
 

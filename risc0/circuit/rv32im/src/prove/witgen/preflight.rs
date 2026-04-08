@@ -55,6 +55,12 @@ pub(crate) enum Back {
     BigInt(BigIntState),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BackRow {
+    pub row: usize,
+    pub back: Back,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PreflightTrace {
     #[debug("{}", cycles.len())]
@@ -64,7 +70,7 @@ pub(crate) struct PreflightTrace {
     #[debug("{}", bigint_bytes.len())]
     pub bigint_bytes: Vec<u8>,
     #[debug("{}", backs.len())]
-    pub backs: Vec<Back>,
+    pub backs: Vec<BackRow>,
     pub table_split_cycle: u32,
     pub rand_z: ExtVal,
 }
@@ -92,13 +98,13 @@ impl Segment {
         tracing::debug!("preflight: {self:#?}");
 
         let mut preflight = Preflight::new(self, rand_z);
-        preflight.read_povw_nonce()?;
-        preflight.read_pages()?;
-        preflight.body()?;
-        preflight.write_pages()?;
-        preflight.generate_tables()?;
-        preflight.wrap_memory_txns()?;
-        preflight.update_p2_zcheck()?;
+        scope!("read_povw_nonce", preflight.read_povw_nonce())?;
+        scope!("read_pages", preflight.read_pages())?;
+        scope!("body", preflight.body())?;
+        scope!("write_pages", preflight.write_pages())?;
+        scope!("generate_tables", preflight.generate_tables())?;
+        scope!("wrap_memory_txns", preflight.wrap_memory_txns())?;
+        scope!("update_p2_zcheck", preflight.update_p2_zcheck())?;
 
         tracing::trace!("paging_cycles: {}", preflight.pager.cycles);
 
@@ -212,9 +218,10 @@ impl<'a> Preflight<'a> {
         for txn in self.trace.txns.iter_mut() {
             // tracing::trace!("{txn:?}");
             let addr = WordAddr(txn.addr);
+            let final_cycle = self.prev_cycle.get(&addr).unwrap();
             if txn.prev_cycle == u32::MAX {
                 // If first cycle for a particular address, set 'prev_cycle' to final cycle
-                txn.prev_cycle = self.prev_cycle.get(&addr).unwrap();
+                txn.prev_cycle = final_cycle;
             } else {
                 // Otherwise, compute cycle diff and another diff
                 ensure!(txn.cycle != txn.prev_cycle);
@@ -223,7 +230,7 @@ impl<'a> Preflight<'a> {
             }
 
             // If last cycle, set final value to original value
-            if txn.cycle == self.prev_cycle.get(&addr).unwrap() {
+            if txn.cycle == final_cycle {
                 txn.word = self.orig_words.get(&addr).unwrap_or_default();
             }
         }
@@ -232,8 +239,9 @@ impl<'a> Preflight<'a> {
 
     fn update_p2_zcheck(&mut self) -> Result<()> {
         let mut checksum = Checksum::new(&self.trace.rand_z);
-        for (row, back) in self.trace.backs.iter_mut().enumerate() {
-            if let Back::Poseidon2(p2_state) = back {
+        for back_row in self.trace.backs.iter_mut() {
+            if let Back::Poseidon2(p2_state) = &mut back_row.back {
+                let row = back_row.row;
                 let cycle = &self.trace.cycles[row];
                 let next_cycle = &self.trace.cycles[row + 1];
                 let state = CycleState::from_u32((cycle.major as u32 - 7) * 8 + cycle.minor as u32)
@@ -312,15 +320,14 @@ impl<'a> Preflight<'a> {
         assert_eq!(self.trace.cycles.len() - start_cycles, RESERVED_CYCLES);
 
         let last_cycle = 1 << self.segment.po2;
-        for _ in self.trace.cycles.len()..last_cycle {
-            self.add_cycle_special(
-                CycleState::ControlDone,
-                CycleState::ControlDone,
-                0,
-                0,
-                Back::None,
-            );
-        }
+        let remaining = last_cycle - self.trace.cycles.len();
+        self.add_cycle_special_repeat(
+            CycleState::ControlDone,
+            CycleState::ControlDone,
+            0,
+            0,
+            remaining,
+        );
         Ok(())
     }
 
@@ -392,8 +399,11 @@ impl<'a> Preflight<'a> {
             diff_count: [0, 0],
         };
         // tracing::trace!("[{}]: {cycle:?}", self.trace.cycles.len());
+        let row = self.trace.cycles.len();
         self.trace.cycles.push(cycle);
-        self.trace.backs.push(back);
+        if !matches!(back, Back::None) {
+            self.trace.backs.push(BackRow { row, back });
+        }
         self.txn_idx = self.trace.txns.len() as u32;
         self.bigint_idx = self.trace.bigint_bytes.len() as u32;
     }
@@ -455,6 +465,37 @@ impl<'a> Preflight<'a> {
         let minor = (raw_cur_state % 8) as u8;
         // tracing::trace!("add_cycle_special(cur_state: {cur_state:?}, next_state: {next_state:?}, major: {major}, minor: {minor})");
         self.add_cycle(next_state, pc, major, minor, paging_idx, back);
+    }
+
+    fn add_cycle_special_repeat(
+        &mut self,
+        cur_state: CycleState,
+        next_state: CycleState,
+        pc: u32,
+        paging_idx: u32,
+        count: usize,
+    ) {
+        if count == 0 {
+            return;
+        }
+
+        let raw_cur_state = cur_state as u32;
+        let cycle = RawPreflightCycle {
+            state: next_state as u32,
+            pc,
+            major: (7 + raw_cur_state / 8) as u8,
+            minor: (raw_cur_state % 8) as u8,
+            machine_mode: self.machine_mode as u8,
+            padding: 0,
+            user_cycle: self.user_cycle,
+            txn_idx: self.txn_idx,
+            paging_idx,
+            bigint_idx: self.bigint_idx,
+            diff_count: [0, 0],
+        };
+
+        let new_len = self.trace.cycles.len() + count;
+        self.trace.cycles.resize(new_len, cycle);
     }
 
     pub(crate) fn on_bigint_cycle(&mut self, cur_state: CycleState, bigint: &BigIntState) {

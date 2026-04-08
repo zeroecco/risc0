@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime.h>
@@ -43,13 +45,23 @@ template <typename... Types> inline std::string fmt(const char* fmt, Types... ar
 
 class CudaStream {
 private:
-  cudaStream_t stream;
+  struct Holder {
+    cudaStream_t stream;
+
+    Holder() { CUDA_OK(cudaStreamCreate(&stream)); }
+    ~Holder() { cudaStreamDestroy(stream); }
+  };
 
 public:
-  CudaStream() { cudaStreamCreate(&stream); }
-  ~CudaStream() { cudaStreamDestroy(stream); }
+  CudaStream() = default;
+  ~CudaStream() = default;
 
-  inline operator cudaStream_t() const { return stream; }
+  static cudaStream_t get() {
+    thread_local Holder holder;
+    return holder.stream;
+  }
+
+  inline operator cudaStream_t() const { return get(); }
 };
 
 struct LaunchConfig {
@@ -74,6 +86,45 @@ inline LaunchConfig getSimpleConfig(uint32_t count) {
   return LaunchConfig{grid, block, 0};
 }
 
+inline int getEnvBlockSize(const char* name, int defaultBlock) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || raw[0] == '\0') {
+    return defaultBlock;
+  }
+
+  char* end = nullptr;
+  long parsed = std::strtol(raw, &end, 10);
+  if (end == raw || (end != nullptr && *end != '\0') || parsed <= 0) {
+    return defaultBlock;
+  }
+
+  return static_cast<int>(parsed);
+}
+
+inline LaunchConfig getBlockConfig(uint32_t count, int block) {
+  int device;
+  CUDA_OK(cudaGetDevice(&device));
+
+  int maxThreads;
+  CUDA_OK(cudaDeviceGetAttribute(&maxThreads, cudaDevAttrMaxThreadsPerBlock, device));
+
+  if (block <= 0) {
+    block = maxThreads / 4;
+  }
+  block = std::min(block, maxThreads);
+
+  int grid = (count + block - 1) / block;
+  return LaunchConfig{grid, block, 0};
+}
+
+inline int roundDownPowerOfTwo(int value) {
+  int out = 1;
+  while (out <= value / 2) {
+    out *= 2;
+  }
+  return out;
+}
+
 template <typename... ExpTypes, typename... ActTypes>
 const char* launchKernel(void (*kernel)(ExpTypes...),
                          uint32_t count,
@@ -82,14 +133,28 @@ const char* launchKernel(void (*kernel)(ExpTypes...),
   try {
     CudaStream stream;
     LaunchConfig cfg = getSimpleConfig(count);
-    cudaLaunchConfig_t config;
-    config.attrs = nullptr;
-    config.numAttrs = 0;
-    config.gridDim = cfg.grid;
-    config.blockDim = cfg.block;
-    config.dynamicSmemBytes = shared_size;
-    config.stream = stream;
-    CUDA_OK(cudaLaunchKernelEx(&config, kernel, std::forward<ActTypes>(args)...));
+    kernel<<<cfg.grid, cfg.block, shared_size, stream>>>(std::forward<ActTypes>(args)...);
+    CUDA_OK(cudaGetLastError());
+    CUDA_OK(cudaStreamSynchronize(stream));
+  } catch (const std::exception& err) {
+    return strdup(err.what());
+  } catch (...) {
+    return strdup("Generic exception");
+  }
+  return nullptr;
+}
+
+template <typename... ExpTypes, typename... ActTypes>
+const char* launchKernelWithBlock(void (*kernel)(ExpTypes...),
+                                  uint32_t count,
+                                  uint32_t block,
+                                  uint32_t shared_size,
+                                  ActTypes&&... args) {
+  try {
+    CudaStream stream;
+    LaunchConfig cfg = getBlockConfig(count, block);
+    kernel<<<cfg.grid, cfg.block, shared_size, stream>>>(std::forward<ActTypes>(args)...);
+    CUDA_OK(cudaGetLastError());
     CUDA_OK(cudaStreamSynchronize(stream));
   } catch (const std::exception& err) {
     return strdup(err.what());

@@ -5,7 +5,7 @@ extern "C" RustError::by_value sppark_init() {
   uint32_t lg_domain_size = 1;
   uint32_t domain_size = 1U << lg_domain_size;
 
-  std::vector<fr_t> inout{domain_size};
+  std::vector<fr_t> inout(domain_size);
   inout[0] = fr_t(1);
   inout[1] = fr_t(1);
 
@@ -111,6 +111,42 @@ sppark_batch_iNTT(fr_t* d_inout, uint32_t lg_domain_size, uint32_t poly_count) {
                         NTT::InputOutputOrder::NR,
                         NTT::Direction::inverse,
                         NTT::Type::standard);
+    }
+
+    gpu.sync();
+  } catch (const cuda_error& e) {
+    gpu.sync();
+    return RustError{e.code(), e.what()};
+  } catch (...) {
+    return RustError(cudaErrorUnknown, "Generic exception");
+  }
+
+  return RustError{cudaSuccess};
+}
+
+extern "C" RustError::by_value
+sppark_batch_iNTT_zk_shift(fr_t* d_inout, uint32_t lg_domain_size, uint32_t poly_count) {
+  if (lg_domain_size == 0)
+    return RustError{cudaSuccess};
+
+  uint32_t domain_size = 1U << lg_domain_size;
+
+  const gpu_t& gpu = select_gpu();
+
+  try {
+    CUDA_OK(cudaDeviceSynchronize());
+
+    for (size_t c = 0; c < poly_count; c++) {
+      NTT::Base_dev_ptr(gpu,
+                        &d_inout[c * domain_size],
+                        lg_domain_size,
+                        NTT::InputOutputOrder::NR,
+                        NTT::Direction::inverse,
+                        NTT::Type::standard);
+    }
+
+    for (size_t c = 0; c < poly_count; c++) {
+      NTT::LDE_powers(gpu, &d_inout[c * domain_size], lg_domain_size);
     }
 
     gpu.sync();

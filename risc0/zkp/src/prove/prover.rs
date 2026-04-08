@@ -40,10 +40,11 @@ fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H
     let coeffs = hal.alloc_elem("coeffs", witness.size());
     hal.eltwise_copy_elem(&coeffs, witness);
     // Do interpolate
+    #[cfg(not(feature = "circuit_debug"))]
+    hal.batch_interpolate_ntt_zk_shift(&coeffs, count);
+    #[cfg(feature = "circuit_debug")]
     hal.batch_interpolate_ntt(&coeffs, count);
     // Convert f(x) -> f(3x), which effective multiplies coefficients c_i by 3^i.
-    #[cfg(not(feature = "circuit_debug"))]
-    hal.zk_shift(&coeffs, count);
     coeffs
 }
 

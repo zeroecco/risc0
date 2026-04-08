@@ -26,7 +26,6 @@ use std::iter::zip;
 use anyhow::{Context, Result};
 use preflight::PreflightTrace;
 use risc0_binfmt::{PovwNonce, WordAddr};
-use risc0_circuit_rv32im_sys::RawPreflightCycle;
 use risc0_core::scope;
 use risc0_zkp::{
     core::digest::DIGEST_WORDS,
@@ -37,7 +36,7 @@ use risc0_zkp::{
 use self::{
     bigint::BigIntState,
     byte_poly::{BigIntAccum, BigIntAccumState},
-    preflight::Back,
+    preflight::{Back, BackRow},
 };
 use super::hal::{CircuitAccumulator, CircuitWitnessGenerator, MetaBuffer, StepMode};
 use crate::{
@@ -54,6 +53,7 @@ use crate::{
 #[derive(Clone, Default)]
 pub struct PreflightResults {
     global: Vec<Val>,
+    dense_trace_cols: DenseTraceCols,
     injector: Injector,
     cycles: usize,
     trace: PreflightTrace,
@@ -65,6 +65,10 @@ impl PreflightResults {
         scope!("preflight_result_new");
 
         let trace = segment.preflight(rand_z)?;
+        Self::from_trace(segment, trace)
+    }
+
+    fn from_trace(segment: &Segment, trace: PreflightTrace) -> Result<Self> {
 
         tracing::trace!("{segment:#?}");
         tracing::trace!("{trace:#?}");
@@ -74,10 +78,11 @@ impl PreflightResults {
         let cycles = 1 << segment.po2;
 
         let global = build_global_vec(segment, &trace);
-        let injector = build_injector(&trace, cycles);
+        let (dense_trace_cols, injector) = build_injector(&trace, cycles);
 
         Ok(Self {
             global,
+            dense_trace_cols,
             injector,
             cycles,
             trace,
@@ -117,6 +122,7 @@ where
             mode,
             &preflight_results.trace,
             preflight_results.global,
+            preflight_results.dense_trace_cols,
             preflight_results.cycles,
             preflight_results.injector,
         )?;
@@ -138,6 +144,7 @@ where
         mode: StepMode,
         trace: &PreflightTrace,
         global: Vec<Val>,
+        dense_trace_cols: DenseTraceCols,
         cycles: usize,
         injector: Injector,
     ) -> Result<(MetaBuffer<H>, MetaBuffer<H>, MetaBuffer<H>, MetaBuffer<H>), anyhow::Error> {
@@ -154,6 +161,7 @@ where
             "alloc(data)",
             MetaBuffer::new("data", hal, cycles, REGCOUNT_DATA, true)
         );
+        inject_dense_trace_cols(hal, &data.buf, cycles, &dense_trace_cols);
         hal.scatter(
             &data.buf,
             &injector.index,
@@ -188,12 +196,12 @@ where
         let mut injector = Injector::new(self.cycles);
         let mut bigint_accum = BigIntAccum::new(last_mix);
 
-        for (row, back) in self.trace.backs.iter().enumerate() {
+        for BackRow { row, back } in &self.trace.backs {
             if let Back::BigInt(state) = back {
                 bigint_accum.step(state)?;
                 for (col, value) in zip(BigIntAccumState::offsets(), bigint_accum.state.as_array())
                 {
-                    injector.set(row, col, value);
+                    injector.set(*row, col, value);
                 }
                 injector.push();
             }
@@ -223,50 +231,130 @@ where
     }
 }
 
-fn build_injector(trace: &PreflightTrace, cycles: usize) -> Injector {
+#[derive(Clone, Default)]
+struct DenseTraceCols {
+    next_pc_low: Vec<Val>,
+    next_pc_high: Vec<Val>,
+    next_state: Vec<Val>,
+    next_machine_mode: Vec<Val>,
+}
+
+fn inject_dense_trace_cols<H: Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>>(
+    hal: &H,
+    data: &H::Buffer<Val>,
+    cycles: usize,
+    dense: &DenseTraceCols,
+) {
+    const CYCLE_COL: usize = LAYOUT_TOP.cycle._super.offset;
+    const NEXT_PC_LOW: usize = LAYOUT_TOP.next_pc_low._super.offset;
+    const NEXT_PC_HIGH: usize = LAYOUT_TOP.next_pc_high._super.offset;
+    const NEXT_STATE: usize = LAYOUT_TOP.next_state_0._super.offset;
+    const NEXT_MACHINE_MODE: usize = LAYOUT_TOP.next_machine_mode._super.offset;
+
+    hal.eltwise_fill_elem_ramp(data, cycles, 0, 1, CYCLE_COL * cycles, 1);
+    hal.eltwise_copy_elem_slice(
+        data,
+        &dense.next_pc_low,
+        cycles,
+        1,
+        0,
+        1,
+        NEXT_PC_LOW * cycles,
+        1,
+    );
+    hal.eltwise_copy_elem_slice(
+        data,
+        &dense.next_pc_high,
+        cycles,
+        1,
+        0,
+        1,
+        NEXT_PC_HIGH * cycles,
+        1,
+    );
+    hal.eltwise_copy_elem_slice(
+        data,
+        &dense.next_state,
+        cycles,
+        1,
+        0,
+        1,
+        NEXT_STATE * cycles,
+        1,
+    );
+    hal.eltwise_copy_elem_slice(
+        data,
+        &dense.next_machine_mode,
+        cycles,
+        1,
+        0,
+        1,
+        NEXT_MACHINE_MODE * cycles,
+        1,
+    );
+}
+
+fn build_injector(trace: &PreflightTrace, cycles: usize) -> (DenseTraceCols, Injector) {
     scope!("build_injector");
 
-    // Set stateful columns from 'top'
+    let mut dense_trace_cols = DenseTraceCols {
+        next_pc_low: Vec::with_capacity(cycles),
+        next_pc_high: Vec::with_capacity(cycles),
+        next_state: Vec::with_capacity(cycles),
+        next_machine_mode: Vec::with_capacity(cycles),
+    };
+
+    // Set sparse stateful columns from 'top'
     let mut injector = Injector::new(cycles);
-    for (row, back) in trace.backs.iter().enumerate() {
-        let cycle = &trace.cycles[row];
-        // tracing::trace!(
-        //     "[{row}] pc: {:#010x}, state: {:?}",
-        //     cycle.pc,
-        //     crate::execute::CycleState::from_u32(cycle.state).unwrap()
-        // );
-        match back {
-            Back::None => {}
-            Back::Ecall(s0, s1, s2) => {
-                const ECALL_S0: usize = LAYOUT_TOP.inst_result.arm8.s0._super.offset;
-                const ECALL_S1: usize = LAYOUT_TOP.inst_result.arm8.s1._super.offset;
-                const ECALL_S2: usize = LAYOUT_TOP.inst_result.arm8.s2._super.offset;
-                injector.set(row, ECALL_S0, *s0);
-                injector.set(row, ECALL_S1, *s1);
-                injector.set(row, ECALL_S2, *s2);
-            }
-            Back::Poseidon2(p2_state) => {
-                for (col, value) in zip(Poseidon2State::offsets(), p2_state.as_array()) {
-                    injector.set(row, col, value);
+    for cycle in &trace.cycles {
+        dense_trace_cols.next_pc_low.push((cycle.pc & 0xffff).into());
+        dense_trace_cols.next_pc_high.push((cycle.pc >> 16).into());
+        dense_trace_cols.next_state.push(cycle.state.into());
+        dense_trace_cols
+            .next_machine_mode
+            .push((cycle.machine_mode as u32).into());
+    }
+
+    let mut next_back = trace.backs.iter().peekable();
+    for row in 0..cycles {
+        if let Some(BackRow { row: back_row, back }) = next_back.peek() {
+            if *back_row == row {
+                match back {
+                    Back::None => {}
+                    Back::Ecall(s0, s1, s2) => {
+                        const ECALL_S0: usize = LAYOUT_TOP.inst_result.arm8.s0._super.offset;
+                        const ECALL_S1: usize = LAYOUT_TOP.inst_result.arm8.s1._super.offset;
+                        const ECALL_S2: usize = LAYOUT_TOP.inst_result.arm8.s2._super.offset;
+                        injector.set(row, ECALL_S0, *s0);
+                        injector.set(row, ECALL_S1, *s1);
+                        injector.set(row, ECALL_S2, *s2);
+                    }
+                    Back::Poseidon2(p2_state) => {
+                        for (col, value) in zip(Poseidon2State::offsets(), p2_state.as_array()) {
+                            injector.set(row, col, value);
+                        }
+                    }
+                    Back::Sha2(sha2_state) => {
+                        for (col, value) in zip(Sha2State::fp_offsets(), sha2_state.fp_array()) {
+                            injector.set(row, col, value);
+                        }
+                        for (col, value) in zip(Sha2State::u32_offsets(), sha2_state.u32_array())
+                        {
+                            injector.set_u32_bits(row, col, value);
+                        }
+                    }
+                    Back::BigInt(state) => {
+                        for (col, value) in zip(BigIntState::offsets(), state.as_array()) {
+                            injector.set(row, col, value);
+                        }
+                    }
                 }
-            }
-            Back::Sha2(sha2_state) => {
-                for (col, value) in zip(Sha2State::fp_offsets(), sha2_state.fp_array()) {
-                    injector.set(row, col, value);
-                }
-                for (col, value) in zip(Sha2State::u32_offsets(), sha2_state.u32_array()) {
-                    injector.set_u32_bits(row, col, value);
-                }
-            }
-            Back::BigInt(state) => {
-                for (col, value) in zip(BigIntState::offsets(), state.as_array()) {
-                    injector.set(row, col, value);
-                }
+                next_back.next();
             }
         }
-        injector.set_cycle(row, cycle);
+        injector.push();
     }
-    injector
+    (dense_trace_cols, injector)
 }
 
 fn build_global_vec(segment: &Segment, trace: &PreflightTrace) -> Vec<Val> {
@@ -348,20 +436,6 @@ impl Injector {
 
     fn push(&mut self) {
         self.index.push(self.offsets.len() as u32);
-    }
-
-    fn set_cycle(&mut self, row: usize, cycle: &RawPreflightCycle) {
-        const CYCLE_COL: usize = LAYOUT_TOP.cycle._super.offset;
-        const NEXT_PC_LOW: usize = LAYOUT_TOP.next_pc_low._super.offset;
-        const NEXT_PC_HIGH: usize = LAYOUT_TOP.next_pc_high._super.offset;
-        const NEXT_STATE: usize = LAYOUT_TOP.next_state_0._super.offset;
-        const NEXT_MACHINE_MODE: usize = LAYOUT_TOP.next_machine_mode._super.offset;
-        self.set(row, CYCLE_COL, row as u32);
-        self.set(row, NEXT_PC_LOW, cycle.pc & 0xffff);
-        self.set(row, NEXT_PC_HIGH, cycle.pc >> 16);
-        self.set(row, NEXT_STATE, cycle.state);
-        self.set(row, NEXT_MACHINE_MODE, cycle.machine_mode as u32);
-        self.push();
     }
 
     fn set(&mut self, row: usize, col: usize, value: u32) {

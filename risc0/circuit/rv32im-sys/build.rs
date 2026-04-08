@@ -15,6 +15,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use risc0_build_kernel::{KernelBuild, KernelType};
@@ -40,7 +41,12 @@ fn build_cpu_kernels() {
 
 fn build_cuda_kernels() {
     let output = "risc0_rv32im_cuda";
+    let eval_output = "risc0_rv32im_cuda_eval";
 
+    println!("cargo:rerun-if-env-changed=RISC0_EVAL_CHECK_OBJECT");
+    println!("cargo:rerun-if-env-changed=RISC0_EVAL_CHECK_MAX_THREADS");
+    println!("cargo:rerun-if-env-changed=RISC0_EVAL_CHECK_MIN_BLOCKS");
+    println!("cargo:rerun-if-env-changed=RISC0_EVAL_CHECK_MAXRREGCOUNT");
     println!("cargo:rerun-if-env-changed=NVCC_APPEND_FLAGS");
     println!("cargo:rerun-if-env-changed=NVCC_PREPEND_FLAGS");
     println!("cargo:rerun-if-env-changed=SCCACHE_RECACHE");
@@ -60,6 +66,8 @@ fn build_cuda_kernels() {
         println!("cargo:{}={}", output, out_path.display());
         return;
     }
+
+    build_eval_check_kernel(eval_output);
 
     let mut build = cc::Build::new();
     build
@@ -82,7 +90,111 @@ fn build_cuda_kernels() {
     if env::var_os("NVCC_PREPEND_FLAGS").is_none() && env::var_os("NVCC_APPEND_FLAGS").is_none() {
         build.flag("-arch=native");
     }
-    build.files(glob_paths("kernels/cuda/*.cu")).compile(output);
+
+    let files = glob_paths("kernels/cuda/*.cu")
+        .into_iter()
+        .filter(|path| {
+            let name = path.file_name().and_then(|x| x.to_str()).unwrap_or_default();
+            !matches!(
+                name,
+                "eval_check_0.cu"
+                    | "eval_check_1.cu"
+                    | "eval_check_2.cu"
+                    | "eval_check_3.cu"
+                    | "ffi_supra.cu"
+                    | "eval_check_combined.cu"
+                    | "steps.cu"
+            )
+        })
+        .collect::<Vec<_>>();
+    build.files(files).file("kernels/cuda/steps.cu").compile(output);
+}
+
+fn build_eval_check_kernel(output: &str) {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let obj_path = out_dir.join("eval_check_combined.o");
+    let lib_path = out_dir.join(format!("lib{output}.a"));
+    let cuda_root = env::var("DEP_RISC0_SYS_CUDA_ROOT").unwrap();
+    let cxx_root = env::var("DEP_RISC0_SYS_CXX_ROOT").unwrap();
+    let sppark_root = env::var("DEP_SPPARK_ROOT").unwrap();
+    let max_threads = env::var("RISC0_EVAL_CHECK_MAX_THREADS").unwrap_or_else(|_| "256".into());
+    let min_blocks = env::var("RISC0_EVAL_CHECK_MIN_BLOCKS").unwrap_or_else(|_| "1".into());
+
+    if let Ok(reuse_obj) = env::var("RISC0_EVAL_CHECK_OBJECT") {
+        let reuse_path = PathBuf::from(&reuse_obj);
+        if reuse_path != obj_path {
+            std::fs::copy(&reuse_obj, &obj_path).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to copy prebuilt eval_check object {reuse_obj} -> {}: {e}",
+                    obj_path.display()
+                )
+            });
+        }
+        build_eval_check_archive(output, &obj_path, &lib_path);
+        return;
+    }
+
+    let mut cmd = Command::new("nvcc");
+    cmd.arg("-c")
+        .arg("-std=c++17")
+        .arg("-O3")
+        .arg("-Xptxas")
+        .arg("-O3,-v")
+        .arg("-Xcompiler")
+        .arg("-O3,-Wno-unused-function,-Wno-unused-parameter")
+        .arg("-diag-suppress=177")
+        .arg("-diag-suppress=550")
+        .arg("-diag-suppress=2922")
+        .arg(format!("-DEVAL_CHECK_MAX_THREADS={max_threads}"))
+        .arg(format!("-DEVAL_CHECK_MIN_BLOCKS={min_blocks}"))
+        .arg(format!("-I{cuda_root}"))
+        .arg(format!("-I{cxx_root}"))
+        .arg(format!("-I{sppark_root}"));
+
+    if let Ok(maxrregcount) = env::var("RISC0_EVAL_CHECK_MAXRREGCOUNT") {
+        cmd.arg(format!("-maxrregcount={maxrregcount}"));
+    }
+
+    if env::var_os("NVCC_PREPEND_FLAGS").is_none() && env::var_os("NVCC_APPEND_FLAGS").is_none() {
+        cmd.arg("-arch=native");
+    }
+
+    cmd.arg("-o")
+        .arg(&obj_path)
+        .arg("kernels/cuda/eval_check_combined.cu");
+
+    let output_res = cmd.output().unwrap_or_else(|e| {
+        panic!("Failed to invoke nvcc for eval_check_combined.cu: {e}");
+    });
+
+    let stdout_str = String::from_utf8_lossy(&output_res.stdout);
+    let stderr_str = String::from_utf8_lossy(&output_res.stderr);
+    for line in stdout_str.lines().chain(stderr_str.lines()) {
+        if !line.is_empty() {
+            println!("cargo:warning={line}");
+        }
+    }
+    assert!(
+        output_res.status.success(),
+        "nvcc failed to compile eval_check_combined.cu (exit code: {})",
+        output_res.status
+    );
+
+    build_eval_check_archive(output, &obj_path, &lib_path);
+}
+
+fn build_eval_check_archive(output: &str, obj_path: &Path, lib_path: &Path) {
+    let status = Command::new("ar")
+        .arg("rcs")
+        .arg(lib_path)
+        .arg(obj_path)
+        .status()
+        .expect("Failed to invoke ar for eval_check_combined");
+    assert!(status.success(), "ar failed for eval_check_combined");
+
+    let out_dir = lib_path.parent().unwrap();
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static={output}");
 }
 
 fn rerun_if_changed<P: AsRef<Path>>(path: P) {

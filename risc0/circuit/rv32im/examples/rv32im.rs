@@ -72,6 +72,8 @@ fn main() {
     .unwrap();
     let user_cycles = result.result.user_cycles as usize;
     let total_cycles = result.result.total_cycles as usize;
+    let warmup_segment = result.segments.first().cloned().unwrap();
+    prover.prewarm_segment(&warmup_segment).unwrap();
 
     scope!("top");
 

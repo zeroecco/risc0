@@ -57,6 +57,16 @@ const char* risc0_zkp_cuda_eltwise_copy_fp_region(Fp* into,
                       intoStride);
 }
 
+const char* risc0_zkp_cuda_eltwise_fill_fp_ramp(Fp* into,
+                                                const uint32_t count,
+                                                const uint32_t start,
+                                                const uint32_t step,
+                                                const uint32_t intoOffset,
+                                                const uint32_t intoStride) {
+  return launchKernel(
+      eltwise_fill_fp_ramp, count, 0, into, count, start, step, intoOffset, intoStride);
+}
+
 const char* risc0_zkp_cuda_eltwise_sum_fpext(Fp* out,
                                              const FpExt* in,
                                              const uint32_t to_add,
@@ -95,14 +105,21 @@ const char* risc0_zkp_cuda_batch_evaluate_any(FpExt* out,
                                               const uint32_t* which,
                                               const FpExt* xs,
                                               uint32_t shared_size,
+                                              uint32_t threads,
                                               const uint32_t count,
                                               const uint32_t deg) {
-  return launchKernel(batch_evaluate_any, count, shared_size, out, coeffs, which, xs, deg);
+  return launchKernelWithBlock(
+      batch_evaluate_any, count, threads, shared_size, out, coeffs, which, xs, deg);
 }
 
 const char* risc0_zkp_cuda_gather_sample(
     Fp* dst, const Fp* src, const uint32_t idx, const uint32_t size, const uint32_t stride) {
   return launchKernel(gather_sample, size, 0, dst, src, idx, size, stride);
+}
+
+const char* risc0_zkp_cuda_gather_digest(
+    DigestVal* dst, const DigestVal* src, const uint32_t* idxs, const uint32_t count) {
+  return launchKernel(gather_digest, count, 0, dst, src, idxs, count);
 }
 
 const char* risc0_zkp_cuda_scatter(Fp* into,

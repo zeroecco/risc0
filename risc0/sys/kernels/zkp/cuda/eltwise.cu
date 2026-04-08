@@ -54,6 +54,18 @@ __global__ void eltwise_copy_fp_region(Fp* into,
   }
 }
 
+__global__ void eltwise_fill_fp_ramp(Fp* into,
+                                     const uint32_t count,
+                                     const uint32_t start,
+                                     const uint32_t step,
+                                     const uint32_t intoOffset,
+                                     const uint32_t intoStride) {
+  uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < count) {
+    into[intoOffset + idx * intoStride] = Fp(start + idx * step);
+  }
+}
+
 __global__ void
 eltwise_sum_fpext(Fp* out, const FpExt* in, const uint32_t to_add, const uint32_t count) {
   uint idx = blockIdx.x * blockDim.x + threadIdx.x;

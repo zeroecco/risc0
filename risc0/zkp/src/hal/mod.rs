@@ -109,6 +109,11 @@ pub trait Hal {
 
     fn batch_interpolate_ntt(&self, io: &Self::Buffer<Self::Elem>, count: usize);
 
+    fn batch_interpolate_ntt_zk_shift(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
+        self.batch_interpolate_ntt(io, count);
+        self.zk_shift(io, count);
+    }
+
     fn batch_bit_reverse(&self, io: &Self::Buffer<Self::Elem>, count: usize);
 
     fn batch_evaluate_any(
@@ -166,6 +171,16 @@ pub trait Hal {
         into_stride: usize,
     );
 
+    fn eltwise_fill_elem_ramp(
+        &self,
+        into: &Self::Buffer<Self::Elem>,
+        count: usize,
+        start: u32,
+        step: u32,
+        into_offset: usize,
+        into_stride: usize,
+    );
+
     fn eltwise_zeroize_elem(&self, elems: &Self::Buffer<Self::Elem>);
 
     fn fri_fold(
@@ -178,6 +193,45 @@ pub trait Hal {
     fn hash_rows(&self, output: &Self::Buffer<Digest>, matrix: &Self::Buffer<Self::Elem>);
 
     fn hash_fold(&self, io: &Self::Buffer<Digest>, input_size: usize, output_size: usize);
+
+    fn hash_merkle_tree(
+        &self,
+        nodes: &Self::Buffer<Digest>,
+        matrix: &Self::Buffer<Self::Elem>,
+        rows: usize,
+        cols: usize,
+        layers: usize,
+    ) {
+        self.hash_rows(&nodes.slice(rows, rows), matrix);
+        for i in (0..layers).rev() {
+            let layer_size = 1 << i;
+            self.hash_fold(nodes, layer_size * 2, layer_size);
+        }
+        let _ = cols;
+    }
+
+    fn gather_digest(
+        &self,
+        dst: &Self::Buffer<Digest>,
+        src: &Self::Buffer<Digest>,
+        indices: &Self::Buffer<u32>,
+        count: usize,
+    ) {
+        let idxs = indices.slice(0, count).to_vec();
+        dst.view_mut(|view| {
+            for i in 0..count {
+                view[i] = src.get_at(idxs[i] as usize);
+            }
+        });
+    }
+
+    fn gather_digest_vec(&self, src: &Self::Buffer<Digest>, indices: &[u32]) -> Vec<Digest> {
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            out.push(src.get_at(idx as usize));
+        }
+        out
+    }
 
     fn gather_sample(
         &self,
@@ -351,6 +405,19 @@ mod testutil {
         hal.copy_from_extelem("values", &values)
     }
 
+    fn generate_digest<H: Hal, R: RngCore>(hal: &H, rng: &mut R, size: usize) -> H::Buffer<Digest> {
+        let values: Vec<Digest> = (0..size)
+            .map(|_| {
+                let mut words = [0u32; 8];
+                for word in &mut words {
+                    *word = rng.next_u32();
+                }
+                Digest::from(words)
+            })
+            .collect();
+        hal.copy_from_digest("digests", &values)
+    }
+
     pub(crate) fn batch_bit_reverse<H: Hal>(hal_gpu: H) {
         let mut rng = rand::rng();
         let hal_cpu = CpuHal::new(hal_gpu.get_hash_suite().clone());
@@ -440,6 +507,23 @@ mod testutil {
                     assert_eq!(src[y * cols + idx], dst[y]);
                 }
             });
+        });
+    }
+
+    pub(crate) fn gather_digest_vec<H: Hal>(hal_gpu: H) {
+        let mut rng = rand::rng();
+        let hal_cpu = CpuHal::new(hal_gpu.get_hash_suite().clone());
+        let hal = DualHal::new(Rc::new(hal_cpu), Rc::new(hal_gpu));
+
+        let src = generate_digest(&hal, &mut rng, 4096);
+        let indices: Vec<u32> = (0..257)
+            .map(|_| (rng.next_u32() as usize % src.size()) as u32)
+            .collect();
+        let actual = hal.gather_digest_vec(&src, indices.as_slice());
+
+        src.view(|src| {
+            let expected: Vec<Digest> = indices.iter().map(|&idx| src[idx as usize]).collect();
+            assert_eq!(actual, expected);
         });
     }
 

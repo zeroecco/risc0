@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cuda/std/array>
 #include <string.h>
+#include <thrust/system/cuda/execution_policy.h>
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
 
@@ -439,14 +440,15 @@ const char* risc0_circuit_rv32im_cuda_witgen(uint32_t mode,
 
     switch (mode) {
     case kStepModeParallel: {
-      auto cfg1 = getSimpleConfig(split);
+      auto cfg1 = getBlockConfig(
+          split, getEnvBlockSize("RISC0_WITGEN_PHASE1_BLOCK_SIZE", /*defaultBlock=*/0));
       size_t phase2Count = lastCycle - split;
       // printf("phase1: %zu, phase2: %zu\n", split, phase2Count);
-      auto cfg2 = getSimpleConfig(phase2Count);
+      auto cfg2 = getBlockConfig(
+          phase2Count, getEnvBlockSize("RISC0_WITGEN_PHASE2_BLOCK_SIZE", /*defaultBlock=*/0));
       {
         nvtx3::scoped_range range("phase1");
         par_stepExec<<<cfg1.grid, cfg1.block, 0, stream>>>(ctx.ctx, 0, split);
-        CUDA_OK(cudaStreamSynchronize(stream));
       }
       {
         nvtx3::scoped_range range("phase2");
@@ -477,12 +479,14 @@ const char* risc0_circuit_rv32im_cuda_accum(AccumBuffers* buffers,
   try {
     HostAccumContext ctx(buffers, preflight, lastCycle);
     CudaStream stream;
-    auto cfg = getSimpleConfig(lastCycle);
+    auto stepCfg = getBlockConfig(
+        lastCycle, getEnvBlockSize("RISC0_STEP_ACCUM_BLOCK_SIZE", /*defaultBlock=*/0));
+    auto finalizeCfg = getBlockConfig(
+        lastCycle, getEnvBlockSize("RISC0_FINALIZE_ACCUM_BLOCK_SIZE", /*defaultBlock=*/0));
 
     {
       nvtx3::scoped_range range("phase1");
-      stepAccum<<<cfg.grid, cfg.block, 0, stream>>>(ctx.ctx, lastCycle);
-      CUDA_OK(cudaStreamSynchronize(stream));
+      stepAccum<<<stepCfg.grid, stepCfg.block, 0, stream>>>(ctx.ctx, lastCycle);
     }
 
     {
@@ -492,14 +496,14 @@ const char* risc0_circuit_rv32im_cuda_accum(AccumBuffers* buffers,
         size_t col = buffers->accum.cols - 4 + j;
         Fp* itBegin = buffers->accum.buf + col * rows;
         Fp* itEnd = buffers->accum.buf + col * rows + lastCycle;
-        thrust::inclusive_scan(thrust::device, itBegin, itEnd, itBegin);
+        thrust::inclusive_scan(thrust::cuda::par.on(stream), itBegin, itEnd, itBegin);
       }
       CUDA_OK(cudaStreamSynchronize(stream));
     }
 
     {
       nvtx3::scoped_range range("phase3");
-      finalizeAccum<<<cfg.grid, cfg.block, 0, stream>>>(ctx.ctx, lastCycle);
+      finalizeAccum<<<finalizeCfg.grid, finalizeCfg.block, 0, stream>>>(ctx.ctx, lastCycle);
       CUDA_OK(cudaStreamSynchronize(stream));
     }
 

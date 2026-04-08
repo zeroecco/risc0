@@ -12,7 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cell::RefCell, fmt::Debug, marker::PhantomData, rc::Rc, sync::OnceLock};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fmt::Debug,
+    marker::PhantomData,
+    rc::Rc,
+    sync::OnceLock,
+};
 
 use anyhow::{bail, Context as _, Result};
 use cust::{
@@ -70,6 +77,23 @@ pub trait CudaHash {
 
     /// Run the hash_rows function
     fn hash_rows(&self, output: &BufferImpl<Digest>, matrix: &BufferImpl<BabyBearElem>);
+
+    /// Build the full Merkle node array for a matrix.
+    fn hash_merkle_tree(
+        &self,
+        nodes: &BufferImpl<Digest>,
+        matrix: &BufferImpl<BabyBearElem>,
+        rows: usize,
+        cols: usize,
+        layers: usize,
+    ) {
+        self.hash_rows(&nodes.slice(rows, rows), matrix);
+        for i in (0..layers).rev() {
+            let layer_size = 1 << i;
+            self.hash_fold(nodes, layer_size);
+        }
+        let _ = cols;
+    }
 
     /// Return the HashSuite
     fn get_hash_suite(&self) -> &HashSuite<BabyBear>;
@@ -171,6 +195,28 @@ impl CudaHash for CudaHashPoseidon2 {
         }
     }
 
+    fn hash_merkle_tree(
+        &self,
+        nodes: &BufferImpl<Digest>,
+        matrix: &BufferImpl<BabyBearElem>,
+        rows: usize,
+        cols: usize,
+        layers: usize,
+    ) {
+        let err = unsafe {
+            sppark_poseidon2_merkle_tree(
+                nodes.as_device_ptr(),
+                matrix.as_device_ptr(),
+                rows.try_into().unwrap(),
+                cols.try_into().unwrap(),
+                layers.try_into().unwrap(),
+            )
+        };
+        if err.code != 0 {
+            panic!("Failure during hash_merkle_tree: {err}");
+        }
+    }
+
     fn get_hash_suite(&self) -> &HashSuite<BabyBear> {
         &self.suite
     }
@@ -234,28 +280,58 @@ pub type CudaHalPoseidon254 = CudaHal<CudaHashPoseidon254>;
 
 struct RawBuffer {
     name: &'static str,
-    buf: DeviceBuffer<u8>,
+    buf: Option<DeviceBuffer<u8>>,
+}
+
+thread_local! {
+    static BUFFER_POOL: RefCell<HashMap<usize, Vec<DeviceBuffer<u8>>>> = RefCell::new(HashMap::new());
+}
+
+fn take_pooled_buffer(size: usize) -> Option<DeviceBuffer<u8>> {
+    BUFFER_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        let entry = pool.get_mut(&size)?;
+        let out = entry.pop();
+        if entry.is_empty() {
+            pool.remove(&size);
+        }
+        out
+    })
+}
+
+fn return_pooled_buffer(buf: DeviceBuffer<u8>) {
+    BUFFER_POOL.with(|pool| {
+        pool.borrow_mut().entry(buf.len()).or_default().push(buf);
+    });
 }
 
 impl RawBuffer {
     pub fn new(name: &'static str, size: usize) -> Self {
         tracing::trace!("alloc: {size} bytes, {name}");
-        tracker().lock().unwrap().alloc(size);
-        let buf = unsafe { DeviceBuffer::uninitialized(size) }
-            .context(format!("allocation failed on {name}: {size} bytes"))
-            .unwrap();
-        Self { name, buf }
+        let buf = if let Some(buf) = take_pooled_buffer(size) {
+            buf
+        } else {
+            tracker().lock().unwrap().alloc(size);
+            unsafe { DeviceBuffer::uninitialized(size) }
+                .context(format!("allocation failed on {name}: {size} bytes"))
+                .unwrap()
+        };
+        Self {
+            name,
+            buf: Some(buf),
+        }
     }
 
     pub fn set_u32(&mut self, value: u32) {
-        self.buf.set_32(value).unwrap();
+        self.buf.as_mut().unwrap().set_32(value).unwrap();
     }
 }
 
 impl Drop for RawBuffer {
     fn drop(&mut self) {
-        tracing::trace!("free: {} bytes, {}", self.buf.len(), self.name);
-        tracker().lock().unwrap().free(self.buf.len());
+        let buf = self.buf.take().unwrap();
+        tracing::trace!("pool: {} bytes, {}", buf.len(), self.name);
+        return_pooled_buffer(buf);
     }
 }
 
@@ -297,7 +373,7 @@ impl<T> BufferImpl<T> {
         assert!(bytes_len > 0);
         let mut buffer = RawBuffer::new(name, bytes_len);
         let bytes = unchecked_cast(slice);
-        buffer.buf.copy_from(bytes).unwrap();
+        buffer.buf.as_mut().unwrap().copy_from(bytes).unwrap();
 
         BufferImpl {
             buffer: Rc::new(RefCell::new(buffer)),
@@ -308,13 +384,13 @@ impl<T> BufferImpl<T> {
     }
 
     pub fn as_device_ptr(&self) -> DevicePointer<u8> {
-        let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
+        let ptr = self.buffer.borrow_mut().buf.as_mut().unwrap().as_device_ptr();
         let offset = self.offset * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
     }
 
     pub fn as_device_ptr_with_offset(&self, offset: usize) -> DevicePointer<u8> {
-        let ptr = self.buffer.borrow_mut().buf.as_device_ptr();
+        let ptr = self.buffer.borrow_mut().buf.as_mut().unwrap().as_device_ptr();
         let offset = (self.offset + offset) * std::mem::size_of::<T>();
         unsafe { ptr.offset(offset.try_into().unwrap()) }
     }
@@ -343,7 +419,7 @@ impl<T: Clone> Buffer<T> for BufferImpl<T> {
         let item_size = std::mem::size_of::<T>();
         let buf = self.buffer.borrow_mut();
         let offset = (self.offset + idx) * item_size;
-        let ptr = unsafe { buf.buf.as_device_ptr().offset(offset as isize) };
+        let ptr = unsafe { buf.buf.as_ref().unwrap().as_device_ptr().offset(offset as isize) };
         let device_slice = unsafe { DeviceSlice::from_raw_parts(ptr, item_size) };
         let host_buf = device_slice.as_host_vec().unwrap();
         let slice: &[T] = unchecked_cast(&host_buf);
@@ -356,7 +432,7 @@ impl<T: Clone> Buffer<T> for BufferImpl<T> {
         let buf = self.buffer.borrow_mut();
         let offset = self.offset * item_size;
         let len = self.size * item_size;
-        let ptr = unsafe { buf.buf.as_device_ptr().offset(offset as isize) };
+        let ptr = unsafe { buf.buf.as_ref().unwrap().as_device_ptr().offset(offset as isize) };
         let device_slice = unsafe { DeviceSlice::from_raw_parts(ptr, len) };
         let host_buf = device_slice.as_host_vec().unwrap();
         let slice = unchecked_cast(&host_buf);
@@ -366,15 +442,15 @@ impl<T: Clone> Buffer<T> for BufferImpl<T> {
     fn view_mut<F: FnOnce(&mut [T])>(&self, f: F) {
         scope!("view_mut");
         let mut buf = self.buffer.borrow_mut();
-        let mut host_buf = buf.buf.as_host_vec().unwrap();
+        let mut host_buf = buf.buf.as_ref().unwrap().as_host_vec().unwrap();
         let slice = unchecked_cast_mut(&mut host_buf);
         f(&mut slice[self.offset..]);
-        buf.buf.copy_from(&host_buf).unwrap();
+        buf.buf.as_mut().unwrap().copy_from(&host_buf).unwrap();
     }
 
     fn to_vec(&self) -> Vec<T> {
         let buf = self.buffer.borrow_mut();
-        let host_buf = buf.buf.as_host_vec().unwrap();
+        let host_buf = buf.buf.as_ref().unwrap().as_host_vec().unwrap();
         let slice = unchecked_cast(&host_buf);
         slice.to_vec()
     }
@@ -591,6 +667,25 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         }
     }
 
+    fn batch_interpolate_ntt_zk_shift(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
+        let row_size = io.size() / count;
+        assert_eq!(row_size * count, io.size());
+        let n_bits = log2_ceil(row_size);
+        assert_eq!(row_size, 1 << n_bits);
+        assert!(n_bits < Self::Elem::MAX_ROU_PO2);
+
+        let err = unsafe {
+            sppark_batch_iNTT_zk_shift(
+                io.as_device_ptr(),
+                n_bits.try_into().unwrap(),
+                count.try_into().unwrap(),
+            )
+        };
+        if err.code != 0 {
+            panic!("Failure during batch_interpolate_ntt_zk_shift: {err}");
+        }
+    }
+
     fn batch_bit_reverse(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
         let row_size = io.size() / count;
         assert_eq!(row_size * count, io.size());
@@ -627,7 +722,13 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         assert_eq!(xs.size(), eval_count);
         assert_eq!(out.size(), eval_count);
 
-        let threads_per_block = self.max_threads / 4;
+        let mut threads_per_block = std::env::var("RISC0_ZKP_BATCH_EVALUATE_ANY_THREADS")
+            .ok()
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .unwrap_or(1024)
+            .min(self.max_threads)
+            .max(1);
+        threads_per_block = 1 << (u32::BITS - 1 - threads_per_block.leading_zeros());
         const BYTES_PER_WORD: u32 = 4;
         const WORDS_PER_FPEXT: u32 = 4;
         let shared_size = threads_per_block * BYTES_PER_WORD * WORDS_PER_FPEXT;
@@ -640,6 +741,7 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
                 which: DevicePointer<u8>,
                 xs: DevicePointer<u8>,
                 shared_size: u32,
+                threads: u32,
                 kernel_count: u32,
                 count: u32,
             ) -> *const std::os::raw::c_char;
@@ -652,6 +754,7 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
                 which.as_device_ptr(),
                 xs.as_device_ptr(),
                 shared_size,
+                threads_per_block,
                 kernel_count as u32,
                 count as u32,
             )
@@ -931,6 +1034,39 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
         .unwrap();
     }
 
+    fn eltwise_fill_elem_ramp(
+        &self,
+        into: &Self::Buffer<Self::Elem>,
+        count: usize,
+        start: u32,
+        step: u32,
+        into_offset: usize,
+        into_stride: usize,
+    ) {
+        extern "C" {
+            fn risc0_zkp_cuda_eltwise_fill_fp_ramp(
+                into: DevicePointer<u8>,
+                count: u32,
+                start: u32,
+                step: u32,
+                into_offset: u32,
+                into_stride: u32,
+            ) -> *const std::os::raw::c_char;
+        }
+
+        ffi_wrap(|| unsafe {
+            risc0_zkp_cuda_eltwise_fill_fp_ramp(
+                into.as_device_ptr(),
+                count as u32,
+                start,
+                step,
+                into_offset as u32,
+                into_stride as u32,
+            )
+        })
+        .unwrap();
+    }
+
     fn fri_fold(
         &self,
         output: &Self::Buffer<Self::Elem>,
@@ -969,6 +1105,79 @@ impl<CH: CudaHash + ?Sized> Hal for CudaHal<CH> {
 
     fn hash_rows(&self, output: &Self::Buffer<Digest>, matrix: &Self::Buffer<Self::Elem>) {
         self.hash.as_ref().unwrap().hash_rows(output, matrix);
+    }
+
+    fn hash_merkle_tree(
+        &self,
+        nodes: &Self::Buffer<Digest>,
+        matrix: &Self::Buffer<Self::Elem>,
+        rows: usize,
+        cols: usize,
+        layers: usize,
+    ) {
+        self.hash
+            .as_ref()
+            .unwrap()
+            .hash_merkle_tree(nodes, matrix, rows, cols, layers);
+    }
+
+    fn gather_digest_vec(&self, src: &Self::Buffer<Digest>, indices: &[u32]) -> Vec<Digest> {
+        if indices.is_empty() {
+            return Vec::new();
+        }
+
+        let dst = self.alloc_digest("digest_sample", indices.len());
+        let indices = self.copy_from_u32("digest_indices", indices);
+
+        extern "C" {
+            fn risc0_zkp_cuda_gather_digest(
+                dst: DevicePointer<u8>,
+                src: DevicePointer<u8>,
+                idxs: DevicePointer<u8>,
+                count: u32,
+            ) -> *const std::os::raw::c_char;
+        }
+
+        ffi_wrap(|| unsafe {
+            risc0_zkp_cuda_gather_digest(
+                dst.as_device_ptr(),
+                src.as_device_ptr(),
+                indices.as_device_ptr(),
+                indices.size() as u32,
+            )
+        })
+        .unwrap();
+
+        let mut out = Vec::with_capacity(indices.size());
+        dst.view(|view| out.extend_from_slice(view));
+        out
+    }
+
+    fn gather_digest(
+        &self,
+        dst: &Self::Buffer<Digest>,
+        src: &Self::Buffer<Digest>,
+        indices: &Self::Buffer<u32>,
+        count: usize,
+    ) {
+        extern "C" {
+            fn risc0_zkp_cuda_gather_digest(
+                dst: DevicePointer<u8>,
+                src: DevicePointer<u8>,
+                idxs: DevicePointer<u8>,
+                count: u32,
+            ) -> *const std::os::raw::c_char;
+        }
+
+        ffi_wrap(|| unsafe {
+            risc0_zkp_cuda_gather_digest(
+                dst.as_device_ptr(),
+                src.as_device_ptr(),
+                indices.as_device_ptr(),
+                count as u32,
+            )
+        })
+        .unwrap();
     }
 
     fn get_hash_suite(&self) -> &HashSuite<Self::Field> {
@@ -1124,6 +1333,11 @@ mod tests {
     #[test]
     fn gather_sample() {
         testutil::gather_sample(CudaHalSha256::new());
+    }
+
+    #[test]
+    fn gather_digest_vec() {
+        testutil::gather_digest_vec(CudaHalSha256::new());
     }
 
     #[test]

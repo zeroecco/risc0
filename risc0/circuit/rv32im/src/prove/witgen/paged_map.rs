@@ -62,7 +62,7 @@ impl Default for PagedMap {
 impl PagedMap {
     /// Returns the value corresponding to the key.
     #[inline(always)]
-    pub fn get(&mut self, addr: &WordAddr) -> Option<u32> {
+    pub fn get(&self, addr: &WordAddr) -> Option<u32> {
         let idx = addr.0 >> 20;
         let mid = self.high.entries.get(idx as usize).unwrap();
         if *mid != 0 {

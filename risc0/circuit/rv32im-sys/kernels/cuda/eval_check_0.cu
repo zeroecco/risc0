@@ -6555,11 +6555,11 @@ __device__ FpExt rv32im_v2_3(uint32_t idx,
 }
 __device__ FpExt poly_fp(uint32_t idx,
                          uint32_t size,
-                         const Fp* ctrl,
-                         const Fp* out,
-                         const Fp* data,
-                         const Fp* mix,
-                         const Fp* accum) {
+                         const Fp* __restrict__ ctrl,
+                         const Fp* __restrict__ out,
+                         const Fp* __restrict__ data,
+                         const Fp* __restrict__ mix,
+                         const Fp* __restrict__ accum) {
   uint32_t mask = size - 1;
   Fp x0(51);
   Fp x1(1073725472);

@@ -21,17 +21,30 @@
 
 namespace risc0::circuit::rv32im_v2::cuda {
 
-__constant__ FpExt poly_mix[kNumPolyMixPows];
+#ifndef EVAL_CHECK_MAX_THREADS
+#define EVAL_CHECK_MAX_THREADS 256
+#endif
 
-__global__ void eval_check(Fp* check,
-                           const Fp* ctrl,
-                           const Fp* data,
-                           const Fp* accum,
-                           const Fp* mix,
-                           const Fp* out,
-                           const Fp rou,
-                           uint32_t po2,
-                           uint32_t domain) {
+#ifndef EVAL_CHECK_MIN_BLOCKS
+#define EVAL_CHECK_MIN_BLOCKS 1
+#endif
+
+#ifndef EVAL_CHECK_COMBINED_TU
+__constant__ FpExt poly_mix[kNumPolyMixPows];
+#endif
+
+__global__ __launch_bounds__(EVAL_CHECK_MAX_THREADS, EVAL_CHECK_MIN_BLOCKS) void eval_check(
+    Fp* __restrict__ check,
+    const Fp* __restrict__ ctrl,
+    const Fp* __restrict__ data,
+    const Fp* __restrict__ accum,
+    const Fp* __restrict__ mix,
+    const Fp* __restrict__ out,
+    const Fp rou,
+    uint32_t po2,
+    uint32_t domain) {
+  asm volatile(".pragma \"enable_smem_spilling\";\n");
+
   uint32_t cycle = blockDim.x * blockIdx.x + threadIdx.x;
   if (cycle < domain) {
     FpExt tot = poly_fp(cycle, domain, ctrl, out, data, mix, accum);
@@ -62,11 +75,11 @@ const char* risc0_circuit_rv32im_cuda_eval_check(Fp* check,
                                                  uint32_t domain,
                                                  const FpExt* poly_mix_pows) {
   try {
-    CUDA_OK(cudaDeviceSynchronize());
-
     CudaStream stream;
-    auto cfg = getSimpleConfig(domain);
-    cudaMemcpyToSymbol(poly_mix, poly_mix_pows, sizeof(poly_mix));
+    auto cfg = getBlockConfig(
+        domain, getEnvBlockSize("RISC0_EVAL_CHECK_BLOCK_SIZE", EVAL_CHECK_MAX_THREADS));
+    CUDA_OK(cudaMemcpyToSymbolAsync(
+        poly_mix, poly_mix_pows, sizeof(poly_mix), 0, cudaMemcpyHostToDevice, stream));
     eval_check<<<cfg.grid, cfg.block, 0, stream>>>(
         check, ctrl, data, accum, mix, out, rou, po2, domain);
     CUDA_OK(cudaStreamSynchronize(stream));

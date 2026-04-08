@@ -580,6 +580,26 @@ impl<F: Field> Hal for CpuHal<F> {
         });
     }
 
+    fn gather_digest_vec(&self, src: &Self::Buffer<Digest>, indices: &[u32]) -> Vec<Digest> {
+        let src = src.as_slice();
+        indices.iter().map(|&idx| src[idx as usize]).collect()
+    }
+
+    fn gather_digest(
+        &self,
+        dst: &Self::Buffer<Digest>,
+        src: &Self::Buffer<Digest>,
+        indices: &Self::Buffer<u32>,
+        count: usize,
+    ) {
+        let src = src.as_slice();
+        let indices = indices.as_slice();
+        let mut dst = dst.as_slice_mut();
+        for i in 0..count {
+            dst[i] = src[indices[i] as usize];
+        }
+    }
+
     fn gather_sample(
         &self,
         dst: &Self::Buffer<Self::Elem>,
@@ -634,6 +654,22 @@ impl<F: Field> Hal for CpuHal<F> {
         }
     }
 
+    fn eltwise_fill_elem_ramp(
+        &self,
+        into: &Self::Buffer<Self::Elem>,
+        count: usize,
+        start: u32,
+        step: u32,
+        into_offset: usize,
+        into_stride: usize,
+    ) {
+        let mut into = into.as_slice_mut();
+        for row in 0..count {
+            into[into_offset + row * into_stride] =
+                Self::Elem::from_u64(start as u64 + row as u64 * step as u64);
+        }
+    }
+
     fn prefix_products(&self, io: &Self::Buffer<Self::ExtElem>) {
         let mut io = io.as_slice_mut();
         for i in 1..io.len() {
@@ -657,6 +693,7 @@ mod tests {
 
     use super::*;
     use crate::core::hash::sha::Sha256HashSuite;
+    use crate::hal::testutil;
 
     #[test]
     #[should_panic]
@@ -750,5 +787,10 @@ mod tests {
                 BabyBearExtElem::from_u32(16),
             ]
         );
+    }
+
+    #[test]
+    fn gather_digest_vec() {
+        testutil::gather_digest_vec(CpuHal::<BabyBear>::new(Sha256HashSuite::new_suite()));
     }
 }

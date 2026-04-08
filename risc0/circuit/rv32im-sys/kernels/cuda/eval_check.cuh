@@ -1,5 +1,5 @@
-
 // This code is automatically generated
+#pragma once
 
 #include "supra/fp.h"
 
@@ -292,14 +292,18 @@ extern __device__ FpExt rv32im_v2_0(
     uint32_t idx, uint32_t size, FpExt* arg0, FpExt arg1, FpExt arg2, FpExt arg3, const Fp* arg4);
 extern __device__ FpExt poly_fp(uint32_t idx,
                                 uint32_t size,
-                                const Fp* ctrl,
-                                const Fp* out,
-                                const Fp* data,
-                                const Fp* mix,
-                                const Fp* accum);
+                                const Fp* __restrict__ ctrl,
+                                const Fp* __restrict__ out,
+                                const Fp* __restrict__ data,
+                                const Fp* __restrict__ mix,
+                                const Fp* __restrict__ accum);
 
 constexpr size_t INV_RATE = 4;
 constexpr size_t kNumPolyMixPows = 458;
+#ifdef EVAL_CHECK_COMBINED_TU
+__constant__ FpExt poly_mix[kNumPolyMixPows];
+#else
 extern __constant__ FpExt poly_mix[kNumPolyMixPows];
+#endif
 
 } // namespace risc0::circuit::rv32im_v2::cuda

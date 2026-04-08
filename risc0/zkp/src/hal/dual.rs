@@ -413,6 +413,20 @@ where
         );
         into.assert_eq();
     }
+
+    fn eltwise_fill_elem_ramp(
+        &self,
+        into: &Self::Buffer<Self::Elem>,
+        count: usize,
+        start: u32,
+        step: u32,
+        into_offset: usize,
+        into_stride: usize,
+    ) {
+        self.lhs.eltwise_fill_elem_ramp(&into.lhs, count, start, step, into_offset, into_stride);
+        self.rhs.eltwise_fill_elem_ramp(&into.rhs, count, start, step, into_offset, into_stride);
+        into.assert_eq();
+    }
 }
 
 pub struct DualCircuitHal<F, LH, RH, LC, RC>

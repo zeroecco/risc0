@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 
@@ -40,12 +40,55 @@ use crate::{
 /// An implementation of a Prover that runs locally.
 pub struct ProverImpl {
     opts: ProverOpts,
+    segment_prover: RefCell<Option<Box<dyn risc0_circuit_rv32im::prove::SegmentProver>>>,
 }
 
 impl ProverImpl {
     /// Construct a [ProverImpl].
     pub fn new(opts: ProverOpts) -> Self {
-        Self { opts }
+        let prover = Self {
+            opts,
+            segment_prover: RefCell::new(None),
+        };
+
+        if let Ok(spec) = std::env::var("RISC0_PREWARM_PO2S") {
+            for po2 in spec.split(',').filter_map(|part| {
+                let part = part.trim();
+                if part.is_empty() {
+                    None
+                } else {
+                    Some(part.parse::<usize>())
+                }
+            }) {
+                match po2 {
+                    Ok(po2) => {
+                        if let Err(err) = prover
+                            .with_segment_prover(|segment_prover| segment_prover.prewarm_po2(po2))
+                        {
+                            tracing::warn!("segment prover prewarm failed for po2={po2}: {err:#}");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("ignoring invalid RISC0_PREWARM_PO2S entry: {err}");
+                    }
+                }
+            }
+        }
+
+        prover
+    }
+
+    fn with_segment_prover<T>(
+        &self,
+        f: impl FnOnce(&dyn risc0_circuit_rv32im::prove::SegmentProver) -> Result<T>,
+    ) -> Result<T> {
+        if self.segment_prover.borrow().is_none() {
+            *self.segment_prover.borrow_mut() =
+                Some(risc0_circuit_rv32im::prove::segment_prover()?);
+        }
+
+        let borrow = self.segment_prover.borrow();
+        f(borrow.as_deref().unwrap())
     }
 }
 
@@ -233,7 +276,8 @@ impl ProverServer for ProverImpl {
             segment.po2(),
             self.opts.max_segment_po2
         );
-        let inner = risc0_circuit_rv32im::prove::segment_prover()?.preflight(&segment.inner)?;
+        let inner =
+            self.with_segment_prover(|segment_prover| segment_prover.preflight(&segment.inner))?;
 
         Ok(PreflightResults {
             inner,
@@ -258,8 +302,9 @@ impl ProverServer for ProverImpl {
         );
 
         let po2 = preflight_results.inner.po2();
-        let seal =
-            risc0_circuit_rv32im::prove::segment_prover()?.prove_core(preflight_results.inner)?;
+        let seal = self.with_segment_prover(|segment_prover| {
+            segment_prover.prove_core(preflight_results.inner)
+        })?;
         let mut claim = ReceiptClaim::decode_from_seal_v2(&seal, Some(po2))?;
         claim.output = preflight_results.output.into();
 

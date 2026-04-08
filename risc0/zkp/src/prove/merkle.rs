@@ -18,6 +18,7 @@ use risc0_core::scope;
 
 use crate::{
     core::digest::Digest,
+    core::to_po2,
     hal::{Buffer, Hal},
     merkle::MerkleTreeParams,
     prove::write_iop::WriteIOP,
@@ -36,6 +37,14 @@ pub struct MerkleTreeProver<H: Hal> {
 
     // The root value
     root: Digest,
+
+    // Host copy of the committed top layer.
+    top: Vec<Digest>,
+
+    // Reused scratch for Merkle column sampling on non-unified-memory backends.
+    sample: Option<H::Buffer<H::Elem>>,
+    sibling_indices: Option<H::Buffer<u32>>,
+    sibling_digests: Option<H::Buffer<Digest>>,
 }
 
 impl<H: Hal> MerkleTreeProver<H> {
@@ -62,32 +71,45 @@ impl<H: Hal> MerkleTreeProver<H> {
         let params = MerkleTreeParams::new(rows, cols, queries);
         // Allocate nodes
         let nodes = hal.alloc_digest("nodes", rows * 2);
-        // hash each column
-        hal.hash_rows(&nodes.slice(rows, rows), matrix);
-        // For each layer, hash up the layer below
-        scope!("hash_fold", {
-            for i in (0..params.layers).rev() {
-                let layer_size = 1 << i;
-                hal.hash_fold(&nodes, layer_size * 2, layer_size);
-            }
+        scope!("hash_merkle_tree", {
+            hal.hash_merkle_tree(&nodes, matrix, rows, cols, params.layers);
         });
-        let root = nodes.get_at(1);
+        let mut top = Vec::with_capacity(params.top_size);
+        nodes.slice(params.top_size, params.top_size).view(|view| {
+            top.extend_from_slice(view);
+        });
+        let hashfn = hal.get_hash_suite().hashfn.as_ref();
+        let mut cur = top.clone();
+        while cur.len() > 1 {
+            let mut next = Vec::with_capacity(cur.len() / 2);
+            for i in (0..cur.len()).step_by(2) {
+                next.push(*hashfn.hash_pair(&cur[i], &cur[i + 1]));
+            }
+            cur = next;
+        }
+        let root = cur[0];
+        let branch_depth = params.layers - to_po2(params.top_size);
+        let sample = (!hal.has_unified_memory()).then(|| hal.alloc_elem("sample", cols));
+        let sibling_indices =
+            (!hal.has_unified_memory()).then(|| hal.alloc_u32("sibling_indices", branch_depth));
+        let sibling_digests =
+            (!hal.has_unified_memory()).then(|| hal.alloc_digest("sibling_digests", branch_depth));
         MerkleTreeProver {
             params,
             matrix: matrix.clone(),
             nodes,
             root,
+            top,
+            sample,
+            sibling_indices,
+            sibling_digests,
         }
     }
 
     /// Write the 'top' of the merkle tree and commit to the root.
     pub fn commit(&self, iop: &mut WriteIOP<H::Field>) {
         scope!("commit");
-        let top_size = self.params.top_size;
-        let slice = self.nodes.slice(top_size, top_size);
-        slice.view(|view| {
-            iop.write_pod_slice(view);
-        });
+        iop.write_pod_slice(self.top.as_slice());
         iop.commit(self.root());
     }
 
@@ -115,9 +137,9 @@ impl<H: Hal> MerkleTreeProver<H> {
                 }
             });
         } else {
-            let sample = hal.alloc_elem("sample", self.params.col_size);
+            let sample = self.sample.as_ref().unwrap();
             hal.gather_sample(
-                &sample,
+                sample,
                 &self.matrix,
                 idx,
                 self.params.col_size,
@@ -129,12 +151,33 @@ impl<H: Hal> MerkleTreeProver<H> {
         }
         iop.write_field_elem_slice::<H::Elem>(out.as_slice());
         let mut idx = idx + self.params.row_size;
+        let mut sibling_idxs = Vec::new();
         while idx >= 2 * self.params.top_size {
             let low_bit = idx % 2;
             idx /= 2;
             let other_idx = 2 * idx + (1 - low_bit);
-            let other = self.nodes.get_at(other_idx);
-            iop.write_pod_slice(&[other]);
+            sibling_idxs.push(other_idx as u32);
+        }
+        if !sibling_idxs.is_empty() {
+            if hal.has_unified_memory() {
+                let siblings = hal.gather_digest_vec(&self.nodes, sibling_idxs.as_slice());
+                iop.write_pod_slice(siblings.as_slice());
+            } else {
+                let sibling_indices = self.sibling_indices.as_ref().unwrap();
+                sibling_indices.view_mut(|view| {
+                    view[..sibling_idxs.len()].copy_from_slice(sibling_idxs.as_slice());
+                });
+                let sibling_digests = self.sibling_digests.as_ref().unwrap();
+                hal.gather_digest(
+                    sibling_digests,
+                    &self.nodes,
+                    sibling_indices,
+                    sibling_idxs.len(),
+                );
+                sibling_digests
+                    .slice(0, sibling_idxs.len())
+                    .view(|view| iop.write_pod_slice(view));
+            }
         }
         out
     }
