@@ -38,7 +38,7 @@ use crate::{
 };
 
 use super::{
-    bigint::BigIntState, node_addr_to_idx, node_idx_to_addr, paged_map::PagedMap,
+    bigint::BigIntState, node_addr_to_idx, node_idx_to_addr, paged_map::{PagedMap, TxnMetaMap},
     poseidon2::Checksum,
 };
 
@@ -87,8 +87,7 @@ pub(crate) struct Preflight<'a> {
     txn_idx: u32,
     bigint_idx: u32,
     user_cycles: u32,
-    orig_words: PagedMap,
-    prev_cycle: PagedMap,
+    txn_meta: TxnMetaMap,
     page_memory: PagedMap,
 }
 
@@ -148,8 +147,7 @@ impl<'a> Preflight<'a> {
             bigint_idx: 0,
             user_cycle: 0,
             user_cycles: 0,
-            orig_words: Default::default(),
-            prev_cycle: Default::default(),
+            txn_meta: Default::default(),
             page_memory,
         }
     }
@@ -218,7 +216,8 @@ impl<'a> Preflight<'a> {
         for txn in self.trace.txns.iter_mut() {
             // tracing::trace!("{txn:?}");
             let addr = WordAddr(txn.addr);
-            let final_cycle = self.prev_cycle.get(&addr).unwrap();
+            let meta = self.txn_meta.get(&addr).unwrap();
+            let final_cycle = meta.last_cycle();
             if txn.prev_cycle == u32::MAX {
                 // If first cycle for a particular address, set 'prev_cycle' to final cycle
                 txn.prev_cycle = final_cycle;
@@ -231,7 +230,7 @@ impl<'a> Preflight<'a> {
 
             // If last cycle, set final value to original value
             if txn.cycle == final_cycle {
-                txn.word = self.orig_words.get(&addr).unwrap_or_default();
+                txn.word = meta.orig_word().unwrap_or_default();
             }
         }
         Ok(())
@@ -623,8 +622,7 @@ impl Risc0Context for Preflight<'_> {
             self.pager.load(addr)?
         };
         if op == LoadOp::Record {
-            self.orig_words.get_mut(&addr).get_or_insert(word);
-            let prev_cycle = self.prev_cycle.insert_default(&addr, cycle, u32::MAX);
+            let prev_cycle = self.txn_meta.record(&addr, cycle, Some(word));
             let txn = RawMemoryTransaction {
                 addr: addr.0,
                 cycle,
@@ -650,7 +648,7 @@ impl Risc0Context for Preflight<'_> {
             self.pager.store(addr, word)?;
             prev_word
         };
-        let prev_cycle = self.prev_cycle.insert_default(&addr, cycle, u32::MAX);
+        let prev_cycle = self.txn_meta.record(&addr, cycle, None);
         let txn = RawMemoryTransaction {
             addr: addr.0,
             cycle,
