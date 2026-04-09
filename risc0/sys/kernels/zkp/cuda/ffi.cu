@@ -153,6 +153,8 @@ const char* risc0_zkp_cuda_combos_prepare(FpExt* combos,
     CudaStream stream;
     combos_prepare<<<1, 1, 0, stream>>>(
         combos, coeffU, regsCount, regSizes, regComboIds, cycles, mix, checkSize, comboCount);
+    CUDA_OK(cudaGetLastError());
+    CUDA_OK(cudaStreamSynchronize(stream));
   } catch (const std::exception& err) {
     return strdup(err.what());
   }

@@ -56,7 +56,18 @@ public:
   CudaStream() = default;
   ~CudaStream() = default;
 
+  static bool use_chained_default_stream() {
+    static int cached = []() {
+      const char* raw = std::getenv("RISC0_CUDA_CHAINED_STREAMS");
+      return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+    }();
+    return cached != 0;
+  }
+
   static cudaStream_t get() {
+    if (use_chained_default_stream()) {
+      return nullptr;
+    }
     thread_local Holder holder;
     return holder.stream;
   }
@@ -135,7 +146,9 @@ const char* launchKernel(void (*kernel)(ExpTypes...),
     LaunchConfig cfg = getSimpleConfig(count);
     kernel<<<cfg.grid, cfg.block, shared_size, stream>>>(std::forward<ActTypes>(args)...);
     CUDA_OK(cudaGetLastError());
-    CUDA_OK(cudaStreamSynchronize(stream));
+    if (!CudaStream::use_chained_default_stream()) {
+      CUDA_OK(cudaStreamSynchronize(stream));
+    }
   } catch (const std::exception& err) {
     return strdup(err.what());
   } catch (...) {
@@ -155,7 +168,9 @@ const char* launchKernelWithBlock(void (*kernel)(ExpTypes...),
     LaunchConfig cfg = getBlockConfig(count, block);
     kernel<<<cfg.grid, cfg.block, shared_size, stream>>>(std::forward<ActTypes>(args)...);
     CUDA_OK(cudaGetLastError());
-    CUDA_OK(cudaStreamSynchronize(stream));
+    if (!CudaStream::use_chained_default_stream()) {
+      CUDA_OK(cudaStreamSynchronize(stream));
+    }
   } catch (const std::exception& err) {
     return strdup(err.what());
   } catch (...) {

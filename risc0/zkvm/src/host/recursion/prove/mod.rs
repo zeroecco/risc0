@@ -17,39 +17,39 @@ pub mod zkr;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use risc0_binfmt::read_sha_halfs;
 use risc0_circuit_recursion::{
-    control_id::BN254_IDENTITY_CONTROL_ID,
-    prove::{DigestKind, RecursionReceipt},
     CircuitImpl,
+    control_id::BN254_IDENTITY_CONTROL_ID,
+    prove::{DigestKind, RecursionProver as CircuitRecursionProver, RecursionReceipt},
 };
 use risc0_circuit_rv32im::RV32IM_SEAL_VERSION;
 use risc0_zkp::{
     adapter::{CircuitInfo, PROOF_SYSTEM_INFO},
     core::{
-        digest::{Digest, DIGEST_SHORTS},
-        hash::{hash_suite_from_name, poseidon2::Poseidon2HashSuite},
+        digest::{DIGEST_SHORTS, Digest},
+        hash::hash_suite_from_name,
     },
     field::baby_bear::BabyBearElem,
     verify::ReadIOP,
 };
 
 use crate::{
+    Assumptions, MaybePruned, Output, ProverOpts, ReceiptClaim, WorkClaim,
     claim::{
+        Unknown,
         merge::Merge,
         receipt::{Assumption, UnionClaim},
-        Unknown,
     },
     receipt::{
-        merkle::{MerkleGroup, MerkleProof},
         SegmentReceipt, SuccinctReceipt, SuccinctReceiptVerifierParameters,
+        merkle::{MerkleGroup, MerkleProof},
     },
     sha::Digestible,
-    Assumptions, MaybePruned, Output, ProverOpts, ReceiptClaim, WorkClaim,
 };
 
 use risc0_circuit_recursion::prove::Program;
@@ -64,6 +64,71 @@ pub(crate) type ZkrRegistry = BTreeMap<Digest, ZkrRegistryEntry>;
 /// A registry to look up programs by control ID.
 pub(crate) static ZKR_REGISTRY: Mutex<ZkrRegistry> = Mutex::new(BTreeMap::new());
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ControlMerkleCacheKey {
+    hashfn: String,
+    control_ids: Vec<Digest>,
+}
+
+struct ControlMerkleCacheEntry {
+    control_root: Digest,
+    proofs: BTreeMap<Digest, MerkleProof>,
+}
+
+static CONTROL_MERKLE_CACHE: Mutex<BTreeMap<ControlMerkleCacheKey, Arc<ControlMerkleCacheEntry>>> =
+    Mutex::new(BTreeMap::new());
+
+fn get_control_merkle_entry(opts: &ProverOpts) -> Result<Arc<ControlMerkleCacheEntry>> {
+    let key = ControlMerkleCacheKey {
+        hashfn: opts.hashfn.clone(),
+        control_ids: opts.control_ids.clone(),
+    };
+    if let Some(entry) = CONTROL_MERKLE_CACHE.lock().unwrap().get(&key) {
+        return Ok(entry.clone());
+    }
+
+    let hashfn = opts.hash_suite()?.hashfn;
+    let group = MerkleGroup::new(opts.control_ids.clone())?;
+    let control_root = group.calc_root(hashfn.as_ref());
+    let proofs = opts
+        .control_ids
+        .iter()
+        .map(|control_id| Ok((*control_id, group.get_proof(control_id, hashfn.as_ref())?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+
+    let entry = Arc::new(ControlMerkleCacheEntry {
+        control_root,
+        proofs,
+    });
+    CONTROL_MERKLE_CACHE
+        .lock()
+        .unwrap()
+        .insert(key, entry.clone());
+    Ok(entry)
+}
+
+fn get_control_merkle_root(opts: &ProverOpts) -> Result<Digest> {
+    Ok(get_control_merkle_entry(opts)?.control_root)
+}
+
+fn get_control_inclusion_proof(opts: &ProverOpts, control_id: &Digest) -> Result<MerkleProof> {
+    get_control_merkle_entry(opts)?
+        .proofs
+        .get(control_id)
+        .cloned()
+        .with_context(|| format!("control id {control_id} not present in allowed control ids"))
+}
+
+fn run_recursion_prover(
+    prover: &mut Prover,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<RecursionReceipt> {
+    match recursion_prover {
+        Some(recursion_prover) => prover.prover.run_with(recursion_prover),
+        None => prover.prover.run(),
+    }
+}
+
 /// Run the lift program to transform an rv32im segment receipt into a recursion receipt.
 ///
 /// The lift program verifies the rv32im circuit STARK proof inside the recursion circuit,
@@ -71,10 +136,17 @@ pub(crate) static ZKR_REGISTRY: Mutex<ZkrRegistry> = Mutex::new(BTreeMap::new())
 /// constant-time verification procedure, with respect to the original segment length, and is then
 /// used as the input to all other recursion programs (e.g. join, resolve, and identity_p254).
 pub fn lift(segment_receipt: &SegmentReceipt) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    lift_with_recursion_prover(segment_receipt, None)
+}
+
+pub(crate) fn lift_with_recursion_prover(
+    segment_receipt: &SegmentReceipt,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
     tracing::debug!("Proving lift: claim = {:#?}", segment_receipt.claim);
     let mut prover = Prover::new_lift(segment_receipt, ProverOpts::succinct())?;
 
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving lift finished: decoded claim = {claim_decoded:#?}");
 
@@ -90,10 +162,17 @@ pub fn lift(segment_receipt: &SegmentReceipt) -> Result<SuccinctReceipt<ReceiptC
 pub fn lift_povw(
     segment_receipt: &SegmentReceipt,
 ) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
+    lift_povw_with_recursion_prover(segment_receipt, None)
+}
+
+pub(crate) fn lift_povw_with_recursion_prover(
+    segment_receipt: &SegmentReceipt,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
     tracing::debug!("Proving lift_povw: claim = {:#?}", segment_receipt.claim);
     let mut prover = Prover::new_lift_povw(segment_receipt, ProverOpts::succinct())?;
 
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
     let mut out_stream = receipt.out_stream();
     tracing::debug!("Proving lift_povw finished: out = {out_stream:?}");
     let claim_decoded = WorkClaim::<ReceiptClaim>::decode_from_seal(&mut out_stream)?;
@@ -117,11 +196,19 @@ pub fn join(
     a: &SuccinctReceipt<ReceiptClaim>,
     b: &SuccinctReceipt<ReceiptClaim>,
 ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    join_with_recursion_prover(a, b, None)
+}
+
+pub(crate) fn join_with_recursion_prover(
+    a: &SuccinctReceipt<ReceiptClaim>,
+    b: &SuccinctReceipt<ReceiptClaim>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
     tracing::debug!("Proving join: a.claim = {:#?}", a.claim);
     tracing::debug!("Proving join: b.claim = {:#?}", b.claim);
 
     let mut prover = Prover::new_join(a, b, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
 
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving join finished: decoded claim = {claim_decoded:#?}");
@@ -140,11 +227,19 @@ pub fn join_povw(
     a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
     b: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
 ) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
+    join_povw_with_recursion_prover(a, b, None)
+}
+
+pub(crate) fn join_povw_with_recursion_prover(
+    a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    b: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
     tracing::debug!("Proving join_povw: a.claim = {:#?}", a.claim);
     tracing::debug!("Proving join_povw: b.claim = {:#?}", b.claim);
 
     let mut prover = Prover::new_join_povw(a, b, false, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
 
     let claim_decoded = WorkClaim::<ReceiptClaim>::decode_from_seal(&mut receipt.out_stream())?;
     tracing::debug!("Proving join_povw finished: decoded claim = {claim_decoded:#?}");
@@ -163,11 +258,19 @@ pub fn join_unwrap_povw(
     a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
     b: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
 ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    join_unwrap_povw_with_recursion_prover(a, b, None)
+}
+
+pub(crate) fn join_unwrap_povw_with_recursion_prover(
+    a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    b: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
     tracing::debug!("Proving join_unwrap_povw: a.claim = {:#?}", a.claim);
     tracing::debug!("Proving join_unwrap_povw: b.claim = {:#?}", b.claim);
 
     let mut prover = Prover::new_join_povw(a, b, true, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
 
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving join_unwrap_povw finished: decoded claim = {claim_decoded:#?}");
@@ -186,6 +289,14 @@ pub fn union(
     a: &SuccinctReceipt<Unknown>,
     b: &SuccinctReceipt<Unknown>,
 ) -> Result<SuccinctReceipt<UnionClaim>> {
+    union_with_recursion_prover(a, b, None)
+}
+
+pub(crate) fn union_with_recursion_prover(
+    a: &SuccinctReceipt<Unknown>,
+    b: &SuccinctReceipt<Unknown>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<UnionClaim>> {
     // NOTE: This will run into issues if the assumption is made with a control root of zero. Right
     // now, this is only used for keccak so this issue has not been hit.
     let a_assumption = a.to_assumption(false)?.digest();
@@ -202,7 +313,7 @@ pub fn union(
     tracing::debug!("Proving union: right assumption = {:#?}", right_assumption);
 
     let mut prover = Prover::new_union(left_receipt, right_receipt, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
 
     let claim = UnionClaim {
         left: left_assumption,
@@ -224,6 +335,17 @@ pub fn resolve<Claim>(
 where
     Claim: risc0_binfmt::Digestible + Debug,
 {
+    resolve_with_recursion_prover(conditional, assumption, None)
+}
+
+pub(crate) fn resolve_with_recursion_prover<Claim>(
+    conditional: &SuccinctReceipt<ReceiptClaim>,
+    assumption: &SuccinctReceipt<Claim>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>>
+where
+    Claim: risc0_binfmt::Digestible + Debug,
+{
     tracing::debug!(
         "Proving resolve: conditional.claim = {:#?}",
         conditional.claim,
@@ -234,7 +356,7 @@ where
     );
 
     let mut prover = Prover::new_resolve(conditional, assumption, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving resolve finished: decoded claim = {claim_decoded:#?}");
 
@@ -261,6 +383,17 @@ pub fn resolve_povw<Claim>(
 where
     Claim: risc0_binfmt::Digestible + Debug,
 {
+    resolve_povw_with_recursion_prover(conditional, assumption, None)
+}
+
+pub(crate) fn resolve_povw_with_recursion_prover<Claim>(
+    conditional: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    assumption: &SuccinctReceipt<Claim>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>>
+where
+    Claim: risc0_binfmt::Digestible + Debug,
+{
     tracing::debug!(
         "Proving resolve_povw: conditional.claim = {:#?}",
         conditional.claim,
@@ -272,7 +405,7 @@ where
 
     let mut prover =
         Prover::new_resolve_povw(conditional, assumption, false, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
     let claim_decoded = WorkClaim::<ReceiptClaim>::decode_from_seal(&mut receipt.out_stream())?;
     tracing::debug!("Proving resolve_povw finished: decoded claim = {claim_decoded:#?}");
 
@@ -299,6 +432,17 @@ pub fn resolve_unwrap_povw<Claim>(
 where
     Claim: risc0_binfmt::Digestible + Debug,
 {
+    resolve_unwrap_povw_with_recursion_prover(conditional, assumption, None)
+}
+
+pub(crate) fn resolve_unwrap_povw_with_recursion_prover<Claim>(
+    conditional: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    assumption: &SuccinctReceipt<Claim>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>>
+where
+    Claim: risc0_binfmt::Digestible + Debug,
+{
     tracing::debug!(
         "Proving resolve_unwrap_povw: conditional.claim = {:#?}",
         conditional.claim,
@@ -310,7 +454,7 @@ where
 
     let mut prover =
         Prover::new_resolve_povw(conditional, assumption, true, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving resolve_unwrap_povw finished: decoded claim = {claim_decoded:#?}");
 
@@ -336,10 +480,17 @@ where
 pub fn unwrap_povw(
     a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
 ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    unwrap_povw_with_recursion_prover(a, None)
+}
+
+pub(crate) fn unwrap_povw_with_recursion_prover(
+    a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
     tracing::debug!("Proving unwrap_povw: a.claim = {:#?}", a.claim);
 
     let mut prover = Prover::new_unwrap_povw(a, ProverOpts::succinct())?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
 
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving unwrap_povw finished: decoded claim = {claim_decoded:#?}");
@@ -358,20 +509,26 @@ pub fn unwrap_povw(
 pub fn identity_p254(
     inner: &SuccinctReceipt<ReceiptClaim>,
 ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    identity_p254_with_recursion_prover(inner, None)
+}
+
+pub(crate) fn identity_p254_with_recursion_prover(
+    inner: &SuccinctReceipt<ReceiptClaim>,
+    recursion_prover: Option<&dyn CircuitRecursionProver>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
     tracing::debug!("identity_p254");
 
     let opts = ProverOpts::succinct()
         .with_hashfn("poseidon_254".to_string())
         .with_control_ids(vec![BN254_IDENTITY_CONTROL_ID]);
     let mut prover = Prover::new_identity(inner, opts)?;
-    let receipt = prover.prover.run()?;
+    let receipt = run_recursion_prover(&mut prover, recursion_prover)?;
     let claim =
         MaybePruned::Value(ReceiptClaim::decode(&mut receipt.out_stream())?).merge(&inner.claim)?;
 
     // Include an inclusion proof for control_id to allow verification against a root.
-    let hashfn = prover.opts.hash_suite()?.hashfn;
     let control_inclusion_proof = prover.control_inclusion_proof()?;
-    let control_root = control_inclusion_proof.root(&prover.control_id, hashfn.as_ref());
+    let control_root = prover.control_root()?;
     let params = SuccinctReceiptVerifierParameters {
         control_root,
         inner_control_root: Some(inner.control_root()?),
@@ -415,10 +572,8 @@ pub fn prove_zkr(
         .map(u32::from),
     ))?;
 
-    let hashfn = opts.hash_suite()?.hashfn;
-    let control_group = MerkleGroup::new(opts.control_ids.clone())?;
-    let control_root = control_group.calc_root(hashfn.as_ref());
-    let control_inclusion_proof = control_group.get_proof(control_id, hashfn.as_ref())?;
+    let control_root = get_control_merkle_root(&opts)?;
+    let control_inclusion_proof = get_control_inclusion_proof(&opts, control_id)?;
 
     let verifier_parameters = SuccinctReceiptVerifierParameters {
         control_root,
@@ -518,10 +673,8 @@ pub fn test_zkr(
     ))?;
 
     // Include an inclusion proof for control_id to allow verification against a root.
-    let hashfn = opts.hash_suite()?.hashfn;
-    let control_inclusion_proof = MerkleGroup::new(opts.control_ids.clone())?
-        .get_proof(&prover.control_id, hashfn.as_ref())?;
-    let control_root = control_inclusion_proof.root(&prover.control_id, hashfn.as_ref());
+    let control_inclusion_proof = prover.control_inclusion_proof()?;
+    let control_root = prover.control_root()?;
     let params = SuccinctReceiptVerifierParameters {
         control_root,
         inner_control_root: Some(digest1.to_owned()),
@@ -572,13 +725,12 @@ impl Prover {
 
     /// Returns a Merkle inclusion proof of this prover's control ID in the set of allowed IDs.
     pub fn control_inclusion_proof(&self) -> Result<MerkleProof> {
-        let hashfn = self
-            .opts
-            .hash_suite()
-            .context("ProverOpts contains invalid hashfn")?
-            .hashfn;
-        MerkleGroup::new(self.opts.control_ids.clone())?
-            .get_proof(&self.control_id, hashfn.as_ref())
+        get_control_inclusion_proof(&self.opts, &self.control_id)
+    }
+
+    /// Returns the Merkle root for this prover's allowed control IDs.
+    pub fn control_root(&self) -> Result<Digest> {
+        get_control_merkle_root(&self.opts)
     }
 
     /// Initialize a recursion prover with the test recursion program. This program is used in
@@ -621,8 +773,7 @@ impl Prover {
 
         let inner_hash_suite = hash_suite_from_name(&segment.hashfn)
             .ok_or_else(|| anyhow!("unsupported hash function: {}", segment.hashfn))?;
-        let allowed_ids = MerkleGroup::new(opts.control_ids.clone())?;
-        let merkle_root = allowed_ids.calc_root(inner_hash_suite.hashfn.as_ref());
+        let merkle_root = get_control_merkle_root(&opts)?;
 
         let out_size = risc0_circuit_rv32im::CircuitImpl::OUTPUT_SIZE;
 
@@ -665,9 +816,7 @@ impl Prover {
         ensure_poseidon2!(a);
         ensure_poseidon2!(b);
 
-        let hash_suite = Poseidon2HashSuite::new_suite();
-        let allowed_ids = MerkleGroup::new(opts.control_ids.clone())?;
-        let merkle_root = allowed_ids.calc_root(hash_suite.hashfn.as_ref());
+        let merkle_root = get_control_merkle_root(&opts)?;
 
         let (program, control_id) = zkr::union(&opts.hashfn)?;
         let mut prover = Prover::new(program, control_id, opts);

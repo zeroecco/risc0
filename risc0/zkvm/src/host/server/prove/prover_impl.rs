@@ -12,35 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
-use super::{keccak::prove_keccak, ProverServer};
+use super::{ProverServer, keccak::prove_keccak};
 use crate::{
+    Assumption, AssumptionReceipt, CompositeReceipt, ExecutorEnv, InnerAssumptionReceipt,
+    MaybePruned, Output, PreflightResults, ProverOpts, Receipt, ReceiptClaim, Segment, Session,
+    UnionClaim, Unknown, VerifierContext, WorkClaim,
     claim::merge::Merge,
     host::{
         client::prove::opts::ReceiptKind,
         prove_info::ProveInfo,
-        recursion::{identity_p254, join, lift, resolve},
+        recursion::prove as recursion_prove,
         server::{exec::executor::ExecutorImpl, prove::union_peak::UnionPeak},
     },
     mmr::MerkleMountainAccumulator,
     receipt::{InnerReceipt, SegmentReceipt, SuccinctReceipt},
-    recursion::prove::{
-        join_povw, join_unwrap_povw, lift_povw, resolve_povw, resolve_unwrap_povw, union,
-        unwrap_povw,
-    },
     sha::Digestible,
-    Assumption, AssumptionReceipt, CompositeReceipt, ExecutorEnv, InnerAssumptionReceipt,
-    MaybePruned, Output, PreflightResults, ProverOpts, Receipt, ReceiptClaim, Segment, Session,
-    UnionClaim, Unknown, VerifierContext, WorkClaim,
 };
 
 /// An implementation of a Prover that runs locally.
 pub struct ProverImpl {
     opts: ProverOpts,
     segment_prover: RefCell<Option<Box<dyn risc0_circuit_rv32im::prove::SegmentProver>>>,
+    recursion_provers:
+        RefCell<HashMap<String, Box<dyn risc0_circuit_recursion::prove::RecursionProver>>>,
+}
+
+fn verify_internal_receipts_enabled() -> bool {
+    static VERIFY_INTERNAL_RECEIPTS: OnceLock<bool> = OnceLock::new();
+    *VERIFY_INTERNAL_RECEIPTS.get_or_init(|| {
+        std::env::var("RISC0_VERIFY_INTERNAL_RECEIPTS")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+            })
+            .unwrap_or(true)
+    })
 }
 
 impl ProverImpl {
@@ -49,6 +59,7 @@ impl ProverImpl {
         let prover = Self {
             opts,
             segment_prover: RefCell::new(None),
+            recursion_provers: RefCell::new(HashMap::new()),
         };
 
         if let Ok(spec) = std::env::var("RISC0_PREWARM_PO2S") {
@@ -89,6 +100,23 @@ impl ProverImpl {
 
         let borrow = self.segment_prover.borrow();
         f(borrow.as_deref().unwrap())
+    }
+
+    fn with_recursion_prover<T>(
+        &self,
+        hashfn: &str,
+        f: impl FnOnce(&dyn risc0_circuit_recursion::prove::RecursionProver) -> Result<T>,
+    ) -> Result<T> {
+        let needs_init = { !self.recursion_provers.borrow().contains_key(hashfn) };
+        if needs_init {
+            self.recursion_provers.borrow_mut().insert(
+                hashfn.to_string(),
+                risc0_circuit_recursion::prove::recursion_prover(hashfn)?,
+            );
+        }
+
+        let borrow = self.recursion_provers.borrow();
+        f(borrow.get(hashfn).unwrap().as_ref())
     }
 }
 
@@ -205,7 +233,9 @@ impl ProverServer for ProverImpl {
 
         // Verify the receipt to catch if something is broken in the proving process.
         // NOTE: If the proof is very large, this could take > 1s, e.g. with 1000 segments.
-        composite_receipt.verify_integrity_with_context(ctx)?;
+        if verify_internal_receipts_enabled() {
+            composite_receipt.verify_integrity_with_context(ctx)?;
+        }
         check_claims(
             &session_claim,
             "composite",
@@ -320,16 +350,22 @@ impl ProverServer for ProverImpl {
             claim,
             verifier_parameters,
         };
-        receipt
-            .verify_integrity_with_context(ctx)
-            .context("verify segment")?;
+        if verify_internal_receipts_enabled() {
+            receipt
+                .verify_integrity_with_context(ctx)
+                .context("verify segment")?;
+        }
 
         Ok(receipt)
     }
 
     fn lift(&self, receipt: &SegmentReceipt) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        let receipt = lift(receipt)?;
-        receipt.verify_integrity().context("verify lift")?;
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::lift_with_recursion_prover(receipt, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify lift")?;
+        }
         Ok(receipt)
     }
 
@@ -337,7 +373,13 @@ impl ProverServer for ProverImpl {
         &self,
         receipt: &SegmentReceipt,
     ) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
-        lift_povw(receipt)
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::lift_povw_with_recursion_prover(receipt, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify lift_povw")?;
+        }
+        Ok(receipt)
     }
 
     fn join(
@@ -345,8 +387,12 @@ impl ProverServer for ProverImpl {
         a: &SuccinctReceipt<ReceiptClaim>,
         b: &SuccinctReceipt<ReceiptClaim>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        let receipt = join(a, b)?;
-        receipt.verify_integrity().context("verify join")?;
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::join_with_recursion_prover(a, b, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify join")?;
+        }
         Ok(receipt)
     }
 
@@ -355,7 +401,13 @@ impl ProverServer for ProverImpl {
         a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
         b: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
     ) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
-        join_povw(a, b)
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::join_povw_with_recursion_prover(a, b, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify join_povw")?;
+        }
+        Ok(receipt)
     }
 
     fn join_unwrap_povw(
@@ -363,7 +415,15 @@ impl ProverServer for ProverImpl {
         a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
         b: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        join_unwrap_povw(a, b)
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::join_unwrap_povw_with_recursion_prover(a, b, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt
+                .verify_integrity()
+                .context("verify join_unwrap_povw")?;
+        }
+        Ok(receipt)
     }
 
     fn resolve(
@@ -371,8 +431,16 @@ impl ProverServer for ProverImpl {
         conditional: &SuccinctReceipt<ReceiptClaim>,
         assumption: &SuccinctReceipt<Unknown>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        let receipt = resolve(conditional, assumption)?;
-        receipt.verify_integrity().context("verify resolve")?;
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::resolve_with_recursion_prover(
+                conditional,
+                assumption,
+                Some(recursion_prover),
+            )
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify resolve")?;
+        }
         Ok(receipt)
     }
 
@@ -381,7 +449,17 @@ impl ProverServer for ProverImpl {
         conditional: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
         assumption: &SuccinctReceipt<Unknown>,
     ) -> Result<SuccinctReceipt<WorkClaim<ReceiptClaim>>> {
-        resolve_povw(conditional, assumption)
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::resolve_povw_with_recursion_prover(
+                conditional,
+                assumption,
+                Some(recursion_prover),
+            )
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify resolve_povw")?;
+        }
+        Ok(receipt)
     }
 
     fn resolve_unwrap_povw(
@@ -389,7 +467,19 @@ impl ProverServer for ProverImpl {
         conditional: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
         assumption: &SuccinctReceipt<Unknown>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        resolve_unwrap_povw(conditional, assumption)
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::resolve_unwrap_povw_with_recursion_prover(
+                conditional,
+                assumption,
+                Some(recursion_prover),
+            )
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt
+                .verify_integrity()
+                .context("verify resolve_unwrap_povw")?;
+        }
+        Ok(receipt)
     }
 
     fn identity_p254(
@@ -397,7 +487,9 @@ impl ProverServer for ProverImpl {
         a: &SuccinctReceipt<ReceiptClaim>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
         // TODO: figure out how to verify this
-        identity_p254(a)
+        self.with_recursion_prover("poseidon_254", |recursion_prover| {
+            recursion_prove::identity_p254_with_recursion_prover(a, Some(recursion_prover))
+        })
     }
 
     fn prove_keccak(
@@ -413,8 +505,12 @@ impl ProverServer for ProverImpl {
         a: &SuccinctReceipt<Unknown>,
         b: &SuccinctReceipt<Unknown>,
     ) -> Result<SuccinctReceipt<UnionClaim>> {
-        let receipt = union(a, b)?;
-        receipt.verify_integrity().context("verify union")?;
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::union_with_recursion_prover(a, b, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify union")?;
+        }
         Ok(receipt)
     }
 
@@ -422,7 +518,13 @@ impl ProverServer for ProverImpl {
         &self,
         a: &SuccinctReceipt<WorkClaim<ReceiptClaim>>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        unwrap_povw(a)
+        let receipt = self.with_recursion_prover(&self.opts.hashfn, |recursion_prover| {
+            recursion_prove::unwrap_povw_with_recursion_prover(a, Some(recursion_prover))
+        })?;
+        if verify_internal_receipts_enabled() {
+            receipt.verify_integrity().context("verify unwrap_povw")?;
+        }
+        Ok(receipt)
     }
 }
 

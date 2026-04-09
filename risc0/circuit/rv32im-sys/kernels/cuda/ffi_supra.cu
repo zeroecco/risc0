@@ -82,7 +82,10 @@ const char* risc0_circuit_rv32im_cuda_eval_check(Fp* check,
         poly_mix, poly_mix_pows, sizeof(poly_mix), 0, cudaMemcpyHostToDevice, stream));
     eval_check<<<cfg.grid, cfg.block, 0, stream>>>(
         check, ctrl, data, accum, mix, out, rou, po2, domain);
-    CUDA_OK(cudaStreamSynchronize(stream));
+    CUDA_OK(cudaGetLastError());
+    if (!CudaStream::use_chained_default_stream()) {
+      CUDA_OK(cudaStreamSynchronize(stream));
+    }
   } catch (const std::exception& err) {
     return strdup(err.what());
   } catch (...) {

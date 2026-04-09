@@ -144,6 +144,11 @@ impl Prover {
     /// program and input.
     pub fn run(&mut self) -> Result<RecursionReceipt> {
         let prover = recursion_prover(&self.hashfn)?;
+        self.run_with(prover.as_ref())
+    }
+
+    /// Run the prover using a caller-supplied recursion prover implementation.
+    pub fn run_with(&mut self, prover: &dyn RecursionProver) -> Result<RecursionReceipt> {
         prover.prove(self.program.clone(), self.input.clone())
     }
 }

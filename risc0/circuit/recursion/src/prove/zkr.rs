@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{Cursor, Read as _};
+use std::{
+    collections::BTreeMap,
+    io::{Cursor, Read as _},
+    sync::Mutex,
+};
 
 use anyhow::{bail, Context as _, Result};
 
@@ -20,10 +24,19 @@ use super::Program;
 
 const ZKR_ZIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/recursion_zkr.zip"));
 
+static ZKR_CACHE: Mutex<BTreeMap<(String, usize), Program>> = Mutex::new(BTreeMap::new());
+
 pub fn get_zkr(name: &str, po2: usize) -> Result<Program> {
+    let key = (name.to_string(), po2);
+    if let Some(program) = ZKR_CACHE.lock().unwrap().get(&key).cloned() {
+        return Ok(program);
+    }
+
     let mut zip = zip::ZipArchive::new(Cursor::new(ZKR_ZIP))?;
     let encoded = extract_zkr(&mut zip, name)?;
-    Ok(Program::from_encoded(&encoded, po2))
+    let program = Program::from_encoded(&encoded, po2);
+    ZKR_CACHE.lock().unwrap().insert(key, program.clone());
+    Ok(program)
 }
 
 /// Iterate over all provided zkr programs.
